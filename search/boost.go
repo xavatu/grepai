@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/store"
 )
 
 // ApplyBoost applies structural boosting to search results based on file path patterns.

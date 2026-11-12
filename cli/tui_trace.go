@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 type traceRow struct {

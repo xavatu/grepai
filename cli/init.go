@@ -8,10 +8,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/git"
-	"github.com/yoanbernabeu/grepai/indexer"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/git"
+	"github.com/xavatu/grepai/indexer"
 )
 
 var (

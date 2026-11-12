@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/stats"
 )
 
 // ---- helpers ----

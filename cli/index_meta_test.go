@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/watcher"
 )
 
 // A model change empties the project's index so every file is re-embedded;

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/git"
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/git"
+	"github.com/xavatu/grepai/internal/fileutil"
 	"gopkg.in/yaml.v3"
 )
 

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/search"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/search"
+	"github.com/xavatu/grepai/store"
 )
 
 // MockStore is a test mock for VectorStore

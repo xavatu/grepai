@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/store"
 )
 
 func TestServerQdrantStoreCacheIntegration(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/xavatu/grepai/embedder"
 )
 
 // recordingBatchEmbedder implements embedder.BatchEmbedder and records the

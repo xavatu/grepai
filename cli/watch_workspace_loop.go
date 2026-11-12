@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 type workspaceWatchLoop struct {

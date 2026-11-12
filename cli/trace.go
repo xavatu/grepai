@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/internal/toon"
-	"github.com/yoanbernabeu/grepai/rpg"
-	gstats "github.com/yoanbernabeu/grepai/stats"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/internal/toon"
+	"github.com/xavatu/grepai/rpg"
+	gstats "github.com/xavatu/grepai/stats"
+	"github.com/xavatu/grepai/trace"
 )
 
 // traceExtractionMode is the only symbol extraction mode the index uses.

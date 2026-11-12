@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/trace"
 )
 
 func TestRunRefs_should_return_readers_and_writers_from_index(t *testing.T) {

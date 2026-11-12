@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 func TestInitWizardBuildConfig(t *testing.T) {

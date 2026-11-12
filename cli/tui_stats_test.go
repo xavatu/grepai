@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/stats"
 )
 
 var testEntries = []stats.Entry{

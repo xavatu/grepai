@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/daemon"
+	"github.com/xavatu/grepai/daemon"
 )
 
 func removeProjectReadyMarker(logDir, worktreeID string) error {

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/store"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/store"
+	"github.com/xavatu/grepai/trace"
 )
 
 type countingFeatureExtractor struct {

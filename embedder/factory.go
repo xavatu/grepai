@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 // requestTimeout returns the configured HTTP request timeout, or zero if the

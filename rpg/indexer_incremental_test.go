@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 func TestRefreshDerivedEdgesIncremental_RebuildsChangedFileEdges(t *testing.T) {

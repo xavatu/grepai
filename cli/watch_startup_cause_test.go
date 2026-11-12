@@ -6,11 +6,11 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/indexer"
-	"github.com/yoanbernabeu/grepai/store"
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/indexer"
+	"github.com/xavatu/grepai/store"
+	"github.com/xavatu/grepai/watcher"
 )
 
 func TestDynamicSupervisorPreservesPeerFatalDuringMainStoreLoad(t *testing.T) {

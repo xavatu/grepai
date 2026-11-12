@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/internal/fileutil"
 )
 
 // GOBSymbolStore implements SymbolStore using GOB encoding.

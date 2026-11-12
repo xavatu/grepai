@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 // A project config must not be able to make grepai execute a file shipped

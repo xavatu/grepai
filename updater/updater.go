@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	githubAPI      = "https://api.github.com/repos/yoanbernabeu/grepai/releases/latest"
+	githubAPI      = "https://api.github.com/repos/xavatu/grepai/releases/latest"
 	defaultTimeout = 60 * time.Second
 )
 
@@ -81,7 +81,7 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*CheckResult, error) {
 		CurrentVersion:  u.currentVersion,
 		LatestVersion:   release.TagName,
 		UpdateAvailable: latestVersion != currentVersion && currentVersion != "dev",
-		ReleaseURL:      fmt.Sprintf("https://github.com/yoanbernabeu/grepai/releases/tag/%s", release.TagName),
+		ReleaseURL:      fmt.Sprintf("https://github.com/xavatu/grepai/releases/tag/%s", release.TagName),
 		PublishedAt:     release.PublishedAt,
 	}, nil
 }

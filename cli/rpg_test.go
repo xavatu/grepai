@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/rpg"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/rpg"
 )
 
 func TestParseRPGNodeKinds_should_accept_comma_separated_kinds(t *testing.T) {

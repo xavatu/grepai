@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 func TestLlamaServerRerank(t *testing.T) {

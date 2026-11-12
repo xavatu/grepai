@@ -4,10 +4,10 @@ import (
 	"context"
 	"log"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/rpg"
-	"github.com/yoanbernabeu/grepai/store"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/rpg"
+	"github.com/xavatu/grepai/store"
+	"github.com/xavatu/grepai/trace"
 )
 
 func persistProjectPeriodically(ctx context.Context, fence *watchMutationFence, st store.VectorStore, symbolStore trace.SymbolStore, rpgStore rpg.RPGStore, projectRoot string, cfg *config.Config) error {

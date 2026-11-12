@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/reranker"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/reranker"
+	"github.com/xavatu/grepai/store"
 )
 
 type Searcher struct {

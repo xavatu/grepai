@@ -11,11 +11,11 @@ import (
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/daemon"
-	"github.com/yoanbernabeu/grepai/git"
-	"github.com/yoanbernabeu/grepai/stats"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/daemon"
+	"github.com/xavatu/grepai/git"
+	"github.com/xavatu/grepai/stats"
+	"github.com/xavatu/grepai/store"
 )
 
 var statusNoUI bool

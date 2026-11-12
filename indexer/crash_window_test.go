@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 // A crash between DeleteByFile and the save of the new chunks must not leave a

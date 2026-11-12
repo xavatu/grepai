@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/search"
-	storelib "github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/search"
+	storelib "github.com/xavatu/grepai/store"
 )
 
 // MockMCPStore is a mock VectorStore for MCP tests

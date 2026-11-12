@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/stats"
 )
 
 // statsWriteTimeout bounds how long a CLI command waits for its stats entry

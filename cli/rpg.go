@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/internal/toon"
-	"github.com/yoanbernabeu/grepai/rpg"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/internal/toon"
+	"github.com/xavatu/grepai/rpg"
 )
 
 var (

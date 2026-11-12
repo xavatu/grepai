@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 func fileSHA256(tb testing.TB, path string) string {

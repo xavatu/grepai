@@ -3,7 +3,7 @@ package search
 import (
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 func TestDeduplicateByFile(t *testing.T) {

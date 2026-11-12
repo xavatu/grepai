@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 func TestHandleAdd(t *testing.T) {

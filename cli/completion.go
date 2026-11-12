@@ -2,7 +2,7 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 var completionCmd = &cobra.Command{

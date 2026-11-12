@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 // MCP trace_callers picks the target and caller definitions like the CLI

@@ -3,7 +3,7 @@ package rpg
 import (
 	"strings"
 
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 // makeSymbolNodeID builds a deterministic node ID for a trace.Symbol.

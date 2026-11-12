@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/framework"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/framework"
+	"github.com/xavatu/grepai/trace"
 )
 
 type mockSymbolExtractor struct {

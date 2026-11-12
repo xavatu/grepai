@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/watcher"
 )
 
 func awaitWatchTestSignal(t *testing.T, signal <-chan struct{}, name string) {

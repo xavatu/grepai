@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 // TestIndexAll_RemovesLegacyBackslashDocuments checks that a store key using

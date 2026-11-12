@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/watcher"
 )
 
 type nonCooperativeCloseWatchSource struct {

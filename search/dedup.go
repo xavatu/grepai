@@ -1,6 +1,6 @@
 package search
 
-import "github.com/yoanbernabeu/grepai/store"
+import "github.com/xavatu/grepai/store"
 
 // DeduplicateByFile keeps only the highest-scoring chunk per file path.
 func DeduplicateByFile(results []store.SearchResult) []store.SearchResult {

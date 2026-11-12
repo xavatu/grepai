@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 // TextSearch performs a simple text-based search on chunks.

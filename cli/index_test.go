@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/store"
 )
 
 func TestRunIndexRoutesProjectAndWorkspace(t *testing.T) {

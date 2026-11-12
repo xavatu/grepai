@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/xavatu/grepai/embedder"
 )
 
 func TestParseRetryAfter_IntegerSeconds(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/trace"
 )
 
 // Evolver handles incremental updates to the RPG graph.

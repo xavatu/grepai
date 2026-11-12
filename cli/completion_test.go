@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 func TestCompletionZsh_should_output_compdef(t *testing.T) {

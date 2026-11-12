@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 func TestNewFromConfig_Ollama(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 func withInitTestState(t *testing.T, dir string, configure func()) {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 const maxErrorBodyBytes = 4096

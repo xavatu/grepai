@@ -10,9 +10,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/rpg"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/rpg"
+	"github.com/xavatu/grepai/trace"
 )
 
 // TestRegisterTools_rootParameterOnProjectTools verifies that tools operating

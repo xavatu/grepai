@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/trace"
 )
 
 func TestLoadWorkspaceSymbolStores_should_return_error_when_workspace_not_found(t *testing.T) {

@@ -12,9 +12,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/framework"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/framework"
+	"github.com/xavatu/grepai/store"
 )
 
 type Indexer struct {

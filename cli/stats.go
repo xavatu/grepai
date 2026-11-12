@@ -8,8 +8,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/stats"
 )
 
 var (

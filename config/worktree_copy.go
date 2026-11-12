@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/internal/fileutil"
 )
 
 // copyFileIfExists atomically publishes src at dst when src exists.

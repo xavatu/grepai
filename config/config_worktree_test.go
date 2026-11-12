@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/internal/fileutil"
 )
 
 func TestCopyFileIfExists(t *testing.T) {

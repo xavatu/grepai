@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/store"
 )
 
 type failingEmbedder struct{ mockEmbedder }

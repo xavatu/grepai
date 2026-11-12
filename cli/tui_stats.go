@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/stats"
 )
 
 type statsView int

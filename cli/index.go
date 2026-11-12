@@ -10,14 +10,14 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/framework"
-	"github.com/yoanbernabeu/grepai/indexer"
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
-	"github.com/yoanbernabeu/grepai/rpg"
-	"github.com/yoanbernabeu/grepai/store"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/framework"
+	"github.com/xavatu/grepai/indexer"
+	"github.com/xavatu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/rpg"
+	"github.com/xavatu/grepai/store"
+	"github.com/xavatu/grepai/trace"
 )
 
 var indexWorkspace string

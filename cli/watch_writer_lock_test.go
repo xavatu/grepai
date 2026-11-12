@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/internal/fileutil"
 )
 
 func TestProjectWatchWriterLockContendsAcrossModesAndLogDirs(t *testing.T) {

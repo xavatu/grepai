@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/watcher"
 )
 
 type workspaceShutdownStore struct {

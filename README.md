@@ -20,6 +20,13 @@
 
 ---
 
+> **This is a fork.** [xavatu/grepai](https://github.com/xavatu/grepai) extends [yoanbernabeu/grepai](https://github.com/yoanbernabeu/grepai) with:
+>
+> - a Qdrant store that runs hybrid search inside Qdrant: dense vectors and BM25 fused with RRF, with server-side path filters;
+> - an optional second-stage neural reranker served by llama-server (see [Neural Reranking](docs/src/content/docs/configuration.md#neural-reranking-disabled-by-default)).
+>
+> The Go module is `github.com/xavatu/grepai`, and `grepai update` checks this fork's releases. Install it [from this fork](#from-this-fork). The Homebrew formula, install scripts and documentation site below belong to upstream: they install and describe upstream builds without these features. Qdrant collections built by upstream grepai use another schema and must be rebuilt.
+
 `grepai` is a privacy-first CLI for semantic code search. It uses vector embeddings to understand code meaning, enabling natural language queries that find relevant code—even when naming conventions vary.
 
 **Drastically reduces AI agent input tokens** by providing relevant context instead of raw search results.
@@ -34,6 +41,32 @@
 - **MCP server** — Your AI agent can call grepai directly as a tool
 
 ## Installation
+
+### From this fork
+
+Requires Go 1.25 or newer and a C compiler (tree-sitter uses cgo):
+
+```bash
+go install github.com/xavatu/grepai/cmd/grepai@main
+```
+
+Or build from a clone; the binary lands in `bin/grepai`:
+
+```bash
+git clone https://github.com/xavatu/grepai.git
+cd grepai
+make build
+```
+
+Start Qdrant and the CUDA reranker with the bundled Compose profiles:
+
+```bash
+docker compose --profile qdrant --profile reranker up -d
+```
+
+### Upstream builds
+
+These install [yoanbernabeu/grepai](https://github.com/yoanbernabeu/grepai) releases, without this fork's features.
 
 **Homebrew (macOS):**
 ```bash

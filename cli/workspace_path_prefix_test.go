@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/search"
-	"github.com/yoanbernabeu/grepai/store"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/search"
+	"github.com/xavatu/grepai/store"
 )
 
 // TestWorkspacePathPrefixing tests that workspace name and project are automatically prepended to search paths

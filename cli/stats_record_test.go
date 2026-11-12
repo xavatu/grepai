@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/stats"
+	"github.com/xavatu/grepai/stats"
 )
 
 // A CLI command exits right after recording its stats, so the entry must be

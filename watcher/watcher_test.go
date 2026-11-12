@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/yoanbernabeu/grepai/indexer"
+	"github.com/xavatu/grepai/indexer"
 )
 
 func newTestWatcher(t *testing.T, root string) *Watcher {

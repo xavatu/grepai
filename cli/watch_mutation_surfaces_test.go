@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/indexer"
-	"github.com/yoanbernabeu/grepai/trace"
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/indexer"
+	"github.com/xavatu/grepai/trace"
+	"github.com/xavatu/grepai/watcher"
 )
 
 func TestWatchMutationWorkerQuiescesBeforeFatalWithdrawal(t *testing.T) {

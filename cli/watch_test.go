@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/daemon"
-	"github.com/yoanbernabeu/grepai/watcher"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/daemon"
+	"github.com/xavatu/grepai/watcher"
 )
 
 func skipIfWindows(t *testing.T) {

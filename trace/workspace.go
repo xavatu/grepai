@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/yoanbernabeu/grepai/config"
+	"github.com/xavatu/grepai/config"
 )
 
 // LoadWorkspaceSymbolStores loads GOBSymbolStores for workspace projects.

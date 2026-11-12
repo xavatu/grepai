@@ -19,15 +19,15 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/embedder"
-	"github.com/yoanbernabeu/grepai/internal/toon"
-	"github.com/yoanbernabeu/grepai/reranker"
-	"github.com/yoanbernabeu/grepai/rpg"
-	"github.com/yoanbernabeu/grepai/search"
-	"github.com/yoanbernabeu/grepai/stats"
-	"github.com/yoanbernabeu/grepai/store"
-	"github.com/yoanbernabeu/grepai/trace"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/embedder"
+	"github.com/xavatu/grepai/internal/toon"
+	"github.com/xavatu/grepai/reranker"
+	"github.com/xavatu/grepai/rpg"
+	"github.com/xavatu/grepai/search"
+	"github.com/xavatu/grepai/stats"
+	"github.com/xavatu/grepai/store"
+	"github.com/xavatu/grepai/trace"
 )
 
 // Server wraps the MCP server with grepai functionality.

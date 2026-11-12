@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/yoanbernabeu/grepai/internal/fileutil"
+	"github.com/xavatu/grepai/internal/fileutil"
 )
 
 // GOBRPGStore implements RPGStore using GOB encoding.

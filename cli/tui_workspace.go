@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/yoanbernabeu/grepai/config"
-	"github.com/yoanbernabeu/grepai/daemon"
+	"github.com/xavatu/grepai/config"
+	"github.com/xavatu/grepai/daemon"
 )
 
 type workspaceCreateStep int
