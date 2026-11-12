@@ -167,11 +167,16 @@ func (s *PostgresStore) Search(ctx context.Context, queryVector []float32, limit
 	args := []interface{}{vec, s.projectID}
 	nextParam := 3
 
-	// Add path prefix filter if provided
-	if opts.PathPrefix != "" {
-		query += ` AND file_path LIKE $` + fmt.Sprintf("%d", nextParam) + ` ESCAPE '\'`
-		args = append(args, escapeLikePattern(opts.PathPrefix)+"%")
-		nextParam++
+	// Add path prefix filters with OR semantics.
+	prefixes := normalizedSearchPathPrefixes(opts)
+	if len(prefixes) > 0 {
+		placeholders := make([]string, 0, len(prefixes))
+		for _, prefix := range prefixes {
+			placeholders = append(placeholders, `file_path LIKE $`+fmt.Sprintf("%d", nextParam)+` ESCAPE '\'`)
+			args = append(args, escapeLikePattern(prefix)+"%")
+			nextParam++
+		}
+		query += ` AND (` + strings.Join(placeholders, ` OR `) + `)`
 	}
 
 	query += ` ORDER BY vector <=> $1

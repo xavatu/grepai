@@ -28,6 +28,31 @@ func setTestHomeDir(t *testing.T, dir string) func() {
 	return func() { os.Setenv("HOME", original) }
 }
 
+func TestWorkspaceRerankerDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	cleanup := setTestHomeDir(t, tmpDir)
+	defer cleanup()
+
+	cfg := DefaultWorkspaceConfig()
+	cfg.Workspaces["code"] = Workspace{
+		Name:     "code",
+		Store:    StoreConfig{Backend: "postgres"},
+		Reranker: RerankerConfig{Enabled: true, Model: "reranker"},
+	}
+	if err := SaveWorkspaceConfig(cfg); err != nil {
+		t.Fatalf("SaveWorkspaceConfig() error = %v", err)
+	}
+
+	loaded, err := LoadWorkspaceConfig()
+	if err != nil {
+		t.Fatalf("LoadWorkspaceConfig() error = %v", err)
+	}
+	got := loaded.Workspaces["code"].Reranker
+	if got.Provider != DefaultRerankerProvider || got.Endpoint != DefaultRerankerEndpoint || got.Candidates != DefaultRerankerCandidates || got.RequestTimeoutSeconds != DefaultRerankerTimeoutSeconds {
+		t.Fatalf("loaded reranker config = %+v", got)
+	}
+}
+
 func TestWorkspaceConfigOperations(t *testing.T) {
 	// Create temp directory for test config
 	tmpDir, err := os.MkdirTemp("", "grepai-test")
@@ -310,6 +335,33 @@ func TestWorkspaceConfigOperations(t *testing.T) {
 			t.Error("expected nil config for non-existent file")
 		}
 	})
+}
+
+func TestLoadWorkspaceConfigAppliesQdrantDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	cleanup := setTestHomeDir(t, tmpDir)
+	defer cleanup()
+
+	configDir := filepath.Join(tmpDir, ".grepai")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	raw := []byte("version: 1\nworkspaces:\n  demo:\n    name: demo\n    store:\n      backend: qdrant\n    embedder:\n      provider: ollama\n    projects: []\n")
+	if err := os.WriteFile(filepath.Join(configDir, WorkspaceConfigFileName), raw, 0o600); err != nil {
+		t.Fatalf("write workspace config: %v", err)
+	}
+
+	cfg, err := LoadWorkspaceConfig()
+	if err != nil {
+		t.Fatalf("LoadWorkspaceConfig failed: %v", err)
+	}
+	ws := cfg.Workspaces["demo"]
+	if ws.Store.Qdrant.Endpoint != DefaultQdrantEndpoint || ws.Store.Qdrant.Port != DefaultQdrantPort {
+		t.Fatalf("workspace Qdrant endpoint defaults = %+v", ws.Store.Qdrant)
+	}
+	if !ws.Store.Qdrant.DenseVectorsOnDisk() || ws.Store.Qdrant.UpsertBatchSize != DefaultQdrantBatchSize {
+		t.Fatalf("workspace Qdrant storage defaults = %+v", ws.Store.Qdrant)
+	}
 }
 
 func TestValidateWorkspaceBackend(t *testing.T) {

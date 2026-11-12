@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,9 +45,15 @@ const (
 	DefaultQwen8BDimensions         = 4096
 	DefaultOpenAIParallelism        = 4
 
-	DefaultPostgresDSN    = "postgres://localhost:5432/grepai"
-	DefaultQdrantEndpoint = "localhost"
-	DefaultQdrantPort     = 6334
+	DefaultRerankerProvider       = "llama-server"
+	DefaultRerankerEndpoint       = "http://127.0.0.1:8081"
+	DefaultRerankerCandidates     = 30
+	DefaultRerankerTimeoutSeconds = 120
+
+	DefaultPostgresDSN     = "postgres://localhost:5432/grepai"
+	DefaultQdrantEndpoint  = "localhost"
+	DefaultQdrantPort      = 6334
+	DefaultQdrantBatchSize = 128
 
 	// RPG default configuration values.
 	DefaultRPGDriftThreshold       = 0.35
@@ -70,6 +77,7 @@ type Config struct {
 	Framework         FrameworkConfig `yaml:"framework_processing"`
 	Watch             WatchConfig     `yaml:"watch"`
 	Search            SearchConfig    `yaml:"search"`
+	Reranker          RerankerConfig  `yaml:"reranker,omitempty"`
 	Trace             TraceConfig     `yaml:"trace"`
 	RPG               RPGConfig       `yaml:"rpg"`
 	Ignore            []string        `yaml:"ignore"`
@@ -80,6 +88,69 @@ type SearchConfig struct {
 	Boost  BoostConfig  `yaml:"boost"`
 	Hybrid HybridConfig `yaml:"hybrid"`
 	Dedup  DedupConfig  `yaml:"dedup"`
+}
+
+// RerankerConfig controls the optional second-stage neural reranker.
+type RerankerConfig struct {
+	Enabled               bool   `yaml:"enabled"`
+	Provider              string `yaml:"provider,omitempty"`
+	Endpoint              string `yaml:"endpoint,omitempty"`
+	Model                 string `yaml:"model,omitempty"`
+	APIKey                string `yaml:"api_key,omitempty"`
+	Candidates            int    `yaml:"candidates,omitempty"`
+	RequestTimeoutSeconds int    `yaml:"request_timeout_seconds,omitempty"`
+}
+
+func DefaultRerankerConfig() RerankerConfig {
+	return RerankerConfig{
+		Provider:              DefaultRerankerProvider,
+		Endpoint:              DefaultRerankerEndpoint,
+		Candidates:            DefaultRerankerCandidates,
+		RequestTimeoutSeconds: DefaultRerankerTimeoutSeconds,
+	}
+}
+
+func (c *RerankerConfig) applyDefaults() {
+	defaults := DefaultRerankerConfig()
+	if c.Provider == "" {
+		c.Provider = defaults.Provider
+	}
+	if c.Endpoint == "" {
+		c.Endpoint = defaults.Endpoint
+	}
+	if c.Candidates == 0 {
+		c.Candidates = defaults.Candidates
+	}
+	if c.RequestTimeoutSeconds == 0 {
+		c.RequestTimeoutSeconds = defaults.RequestTimeoutSeconds
+	}
+}
+
+// ValidateRerankerConfig validates the optional reranker settings.
+func ValidateRerankerConfig(cfg RerankerConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if cfg.Provider != DefaultRerankerProvider {
+		return fmt.Errorf("reranker.provider must be %q, got %q", DefaultRerankerProvider, cfg.Provider)
+	}
+	if cfg.Endpoint == "" {
+		return fmt.Errorf("reranker.endpoint must not be empty")
+	}
+	parsedEndpoint, err := url.ParseRequestURI(cfg.Endpoint)
+	if err != nil || parsedEndpoint.Scheme == "" || parsedEndpoint.Host == "" {
+		return fmt.Errorf("reranker.endpoint must be an absolute HTTP(S) URL, got %q", cfg.Endpoint)
+	}
+	if parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https" {
+		return fmt.Errorf("reranker.endpoint must use http or https, got %q", parsedEndpoint.Scheme)
+	}
+	if cfg.Candidates < 1 {
+		return fmt.Errorf("reranker.candidates must be >= 1, got %d", cfg.Candidates)
+	}
+	if cfg.RequestTimeoutSeconds < 1 {
+		return fmt.Errorf("reranker.request_timeout_seconds must be >= 1, got %d", cfg.RequestTimeoutSeconds)
+	}
+	return nil
 }
 
 // DedupConfig controls file-level deduplication of search results.
@@ -230,11 +301,35 @@ type PostgresConfig struct {
 }
 
 type QdrantConfig struct {
-	Endpoint   string `yaml:"endpoint"`             // e.g., "http://localhost" or "localhost"
-	Port       int    `yaml:"port,omitempty"`       // e.g., 6333
-	Collection string `yaml:"collection,omitempty"` // Optional, defaults from project path
-	APIKey     string `yaml:"api_key,omitempty"`    // Optional, for Qdrant Cloud
-	UseTLS     bool   `yaml:"use_tls,omitempty"`    // Enable TLS (for Qdrant Cloud)
+	Endpoint        string `yaml:"endpoint"`                    // e.g., "http://localhost" or "localhost"
+	Port            int    `yaml:"port,omitempty"`              // gRPC port, normally 6334
+	Collection      string `yaml:"collection,omitempty"`        // Optional, defaults from project path
+	APIKey          string `yaml:"api_key,omitempty"`           // Optional, for Qdrant Cloud
+	UseTLS          bool   `yaml:"use_tls,omitempty"`           // Enable TLS (for Qdrant Cloud)
+	DenseOnDisk     *bool  `yaml:"dense_on_disk,omitempty"`     // Serve original dense vectors from disk
+	UpsertBatchSize int    `yaml:"upsert_batch_size,omitempty"` // Points per synchronous upsert
+}
+
+// DenseVectorsOnDisk returns the effective dense vector storage setting.
+// It defaults to true for large repositories when omitted from older configs.
+func (c QdrantConfig) DenseVectorsOnDisk() bool {
+	return c.DenseOnDisk == nil || *c.DenseOnDisk
+}
+
+func (c *QdrantConfig) applyDefaults() {
+	defaults := DefaultStoreForBackend("qdrant").Qdrant
+	if c.Endpoint == "" {
+		c.Endpoint = defaults.Endpoint
+	}
+	if c.Port <= 0 {
+		c.Port = defaults.Port
+	}
+	if c.DenseOnDisk == nil {
+		c.DenseOnDisk = defaults.DenseOnDisk
+	}
+	if c.UpsertBatchSize <= 0 {
+		c.UpsertBatchSize = defaults.UpsertBatchSize
+	}
 }
 
 type ChunkingConfig struct {
@@ -257,9 +352,12 @@ func DefaultStoreForBackend(backend string) StoreConfig {
 			DSN: DefaultPostgresDSN,
 		}
 	case "qdrant":
+		denseOnDisk := true
 		cfg.Qdrant = QdrantConfig{
-			Endpoint: DefaultQdrantEndpoint,
-			Port:     DefaultQdrantPort,
+			Endpoint:        DefaultQdrantEndpoint,
+			Port:            DefaultQdrantPort,
+			DenseOnDisk:     &denseOnDisk,
+			UpsertBatchSize: DefaultQdrantBatchSize,
 		}
 	}
 	return cfg
@@ -468,6 +566,7 @@ func DefaultConfig() *Config {
 				},
 			},
 		},
+		Reranker: DefaultRerankerConfig(),
 		Trace: TraceConfig{
 			EnabledLanguages: []string{
 				".go", ".js", ".ts", ".jsx", ".tsx", ".vue", ".py", ".php",
@@ -546,6 +645,9 @@ func Load(projectRoot string) (*Config, error) {
 
 	// Apply defaults for missing values (backward compatibility)
 	cfg.applyDefaults()
+	if err := ValidateRerankerConfig(cfg.Reranker); err != nil {
+		return nil, fmt.Errorf("invalid reranker configuration: %w", err)
+	}
 
 	// Validate watch timing configuration
 	if err := ValidateWatchConfig(cfg.Watch); err != nil {
@@ -567,6 +669,7 @@ func Load(projectRoot string) (*Config, error) {
 // have newer fields like dimensions or endpoint.
 func (c *Config) applyDefaults() {
 	defaults := DefaultConfig()
+	c.Reranker.applyDefaults()
 
 	// Embedder defaults
 	if c.Embedder.Endpoint == "" {
@@ -645,8 +748,8 @@ func (c *Config) applyDefaults() {
 	}
 
 	// Qdrant defaults
-	if c.Store.Backend == "qdrant" && c.Store.Qdrant.Port <= 0 {
-		c.Store.Qdrant.Port = DefaultStoreForBackend("qdrant").Qdrant.Port
+	if c.Store.Backend == "qdrant" {
+		c.Store.Qdrant.applyDefaults()
 	}
 
 	// RPG defaults

@@ -54,8 +54,10 @@ store:
   #   endpoint: localhost
   #   port: 6334
   #   use_tls: false
-  #   collection: ""            # default: derived from the project path
+  #   collection: ""            # default: project directory name + path hash
   #   api_key: ""               # for Qdrant Cloud
+  #   dense_on_disk: true       # serve original dense vectors from disk
+  #   upsert_batch_size: 128    # points per synchronous write
 
 chunking:
   size: 512                     # chunk budget in tokens (estimated as 4 characters per token)
@@ -103,6 +105,13 @@ search:
   dedup:
     enabled: true               # keep only the best chunk per file
 
+reranker:                       # optional second-stage reranker, see "Neural Reranking"
+  enabled: false
+  provider: llama-server
+  endpoint: http://127.0.0.1:8081
+  candidates: 30
+  request_timeout_seconds: 120
+
 trace:
   enabled_languages:            # extensions included in the symbol index
     - .go
@@ -144,6 +153,7 @@ ignore:                         # directory or file names skipped everywhere
 Notes on specific keys:
 
 - `ignore` replaces the default list when you set it. Copy the defaults if you want to keep them.
+- `reranker` has load-time defaults: an older file without it keeps reranking disabled.
 - `search` has no load-time defaults. If your config has no `search:` section (for example, an older file), boost and deduplication are off. Run `grepai init` in a scratch directory to get the current defaults.
 - Older config files may still contain `trace.mode`, `trace.exclude_patterns`, `update.check_on_startup` or `rpg.store_path`. These keys never had any effect and were removed; grepai ignores them and drops them the next time it saves the file.
 - `framework_processing` runs a Node.js script to compile Vue single-file components before embedding and tracing. Only the Vue processor is implemented; the Svelte, Astro and Solid entries are placeholders. With `mode: auto`, grepai falls back to the raw file if Node or the Vue compiler is missing. `require` fails instead, and `off` disables processing.
@@ -264,6 +274,8 @@ On startup, grepai runs `CREATE EXTENSION IF NOT EXISTS vector` and creates its 
 
 ### Qdrant
 
+Qdrant 1.19 or newer is required.
+
 ```yaml
 store:
   backend: qdrant
@@ -271,6 +283,8 @@ store:
     endpoint: localhost
     port: 6334          # gRPC port
     use_tls: false
+    dense_on_disk: true
+    upsert_batch_size: 128
 ```
 
 To start Qdrant locally with Docker:
@@ -400,6 +414,37 @@ search:
   dedup:
     enabled: true
 ```
+
+### Neural Reranking (disabled by default)
+
+An optional llama-server reranker can rescore the strongest vector or hybrid
+search candidates before grepai returns the final results:
+
+```yaml
+reranker:
+  enabled: true
+  provider: llama-server
+  endpoint: http://127.0.0.1:8081
+  model: ebasKing/Qwen3-Reranker-4B-GGUF-llama_cpp:Q6_K
+  candidates: 30
+  request_timeout_seconds: 120
+```
+
+`candidates` controls the quality/latency tradeoff independently of the
+requested result limit. The reranker score is applied first, followed by the
+existing path bonuses and penalties. If llama-server is unavailable, grepai
+logs a warning and returns the original retrieval ranking.
+
+The included Compose profile runs the Q6_K model with CUDA:
+
+```bash
+docker compose --profile qdrant --profile reranker up -d
+curl http://127.0.0.1:8081/health
+```
+
+The first start downloads approximately 3.3 GB into the persistent
+`grepai-reranker-cache` volume. NVIDIA Container Toolkit is required for GPU
+access. The same `reranker` block is accepted in a workspace configuration.
 
 ## External Gitignore
 

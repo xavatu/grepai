@@ -36,6 +36,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Store.Backend != "gob" {
 		t.Errorf("expected backend gob, got %s", cfg.Store.Backend)
 	}
+	if cfg.Reranker.Enabled || cfg.Reranker.Provider != DefaultRerankerProvider || cfg.Reranker.Endpoint != DefaultRerankerEndpoint {
+		t.Fatalf("unexpected default reranker config: %+v", cfg.Reranker)
+	}
+	if cfg.Reranker.Candidates != DefaultRerankerCandidates || cfg.Reranker.RequestTimeoutSeconds != DefaultRerankerTimeoutSeconds {
+		t.Fatalf("unexpected default reranker limits: %+v", cfg.Reranker)
+	}
 
 	if cfg.Chunking.Size != 512 {
 		t.Errorf("expected chunk size 512, got %d", cfg.Chunking.Size)
@@ -81,6 +87,34 @@ func TestDefaultConfig(t *testing.T) {
 		if !slices.Contains(cfg.Trace.EnabledLanguages, ext) {
 			t.Errorf("expected trace.enabled_languages to contain %s", ext)
 		}
+	}
+}
+
+func TestRerankerConfigDefaultsAndValidation(t *testing.T) {
+	cfg := RerankerConfig{Enabled: true}
+	cfg.applyDefaults()
+	if err := ValidateRerankerConfig(cfg); err != nil {
+		t.Fatalf("defaulted reranker config is invalid: %v", err)
+	}
+	if cfg.Provider != DefaultRerankerProvider || cfg.Endpoint != DefaultRerankerEndpoint || cfg.Candidates != 30 || cfg.RequestTimeoutSeconds != 120 {
+		t.Fatalf("defaulted reranker config = %+v", cfg)
+	}
+
+	tests := []RerankerConfig{
+		{Enabled: true, Provider: "unknown", Endpoint: DefaultRerankerEndpoint, Candidates: 1, RequestTimeoutSeconds: 1},
+		{Enabled: true, Provider: DefaultRerankerProvider, Endpoint: "localhost:8081", Candidates: 1, RequestTimeoutSeconds: 1},
+		{Enabled: true, Provider: DefaultRerankerProvider, Endpoint: "ftp://localhost/model", Candidates: 1, RequestTimeoutSeconds: 1},
+		{Enabled: true, Provider: DefaultRerankerProvider, Endpoint: DefaultRerankerEndpoint, Candidates: -1, RequestTimeoutSeconds: 1},
+		{Enabled: true, Provider: DefaultRerankerProvider, Endpoint: DefaultRerankerEndpoint, Candidates: 1, RequestTimeoutSeconds: -1},
+	}
+	for _, invalid := range tests {
+		if err := ValidateRerankerConfig(invalid); err == nil {
+			t.Errorf("ValidateRerankerConfig(%+v) error = nil", invalid)
+		}
+	}
+
+	if err := ValidateRerankerConfig(RerankerConfig{Enabled: false, Provider: "ignored"}); err != nil {
+		t.Fatalf("disabled reranker should not be validated: %v", err)
 	}
 }
 
@@ -161,6 +195,27 @@ func TestDefaultStoreForBackend(t *testing.T) {
 	}
 	if qdrant.Qdrant.Endpoint != DefaultQdrantEndpoint || qdrant.Qdrant.Port != DefaultQdrantPort {
 		t.Fatalf("unexpected qdrant defaults: %+v", qdrant.Qdrant)
+	}
+	if qdrant.Qdrant.DenseOnDisk == nil || !*qdrant.Qdrant.DenseOnDisk {
+		t.Fatalf("qdrant dense_on_disk default = %v, want true", qdrant.Qdrant.DenseOnDisk)
+	}
+	if qdrant.Qdrant.UpsertBatchSize != DefaultQdrantBatchSize {
+		t.Fatalf("qdrant upsert batch default = %d, want %d", qdrant.Qdrant.UpsertBatchSize, DefaultQdrantBatchSize)
+	}
+}
+
+func TestQdrantConfigApplyDefaultsPreservesExplicitValues(t *testing.T) {
+	denseOnDisk := false
+	cfg := QdrantConfig{
+		Endpoint:        "qdrant.example.test",
+		Port:            7443,
+		DenseOnDisk:     &denseOnDisk,
+		UpsertBatchSize: 17,
+	}
+	cfg.applyDefaults()
+
+	if cfg.Endpoint != "qdrant.example.test" || cfg.Port != 7443 || cfg.DenseVectorsOnDisk() || cfg.UpsertBatchSize != 17 {
+		t.Fatalf("explicit Qdrant values were overwritten: %+v", cfg)
 	}
 }
 

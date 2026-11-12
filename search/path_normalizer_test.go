@@ -177,3 +177,37 @@ func TestNormalizeWorkspacePathPrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspacePathPrefixes(t *testing.T) {
+	all := []string{"api", "api-gateway", "web"}
+	tests := []struct {
+		name     string
+		selected []string
+		all      []string
+		path     string
+		want     []string
+	}{
+		{"single project path is relative to it", []string{"api"}, all, `src\auth`, []string{"platform/api/src/auth"}},
+		{"single project without path", []string{"api"}, all, "", []string{"platform/api/"}},
+		{"no path keeps every project", nil, all, "", []string{"platform/api/", "platform/api-gateway/", "platform/web/"}},
+		{"path starts with the project name", nil, all, "web/src", []string{"platform/web/src"}},
+		{"bare project name is a string prefix", nil, all, "api", []string{"platform/api/", "platform/api-gateway/"}},
+		{"project name with a slash matches that project only", nil, all, "api/", []string{"platform/api/"}},
+		{"selected projects skip blanks and duplicates", []string{"api", "", "web", "api"}, all, "", []string{"platform/api/", "platform/web/"}},
+		{"path outside the selected projects", []string{"api", "web"}, all, "api-gateway/src", []string{}},
+		{"workspace without projects", nil, nil, "src", []string{"platform/src"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := WorkspacePathPrefixes("platform", tt.selected, tt.all, tt.path)
+			if len(got) != len(tt.want) {
+				t.Fatalf("WorkspacePathPrefixes() = %#v, want %#v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("WorkspacePathPrefixes() = %#v, want %#v", got, tt.want)
+				}
+			}
+		})
+	}
+}

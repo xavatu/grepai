@@ -11,6 +11,12 @@ import (
 // It scores chunks based on the number of query words they contain.
 // If pathPrefix is provided, only chunks from files starting with that prefix are included.
 func TextSearch(ctx context.Context, chunks []store.Chunk, query string, limit int, pathPrefix string) []store.SearchResult {
+	return TextSearchWithOptions(ctx, chunks, query, limit, store.SearchOptions{PathPrefix: pathPrefix})
+}
+
+// TextSearchWithOptions performs text search with the same path filtering
+// semantics as vector stores.
+func TextSearchWithOptions(ctx context.Context, chunks []store.Chunk, query string, limit int, opts store.SearchOptions) []store.SearchResult {
 	words := tokenize(query)
 	if len(words) == 0 {
 		return nil
@@ -20,7 +26,7 @@ func TextSearch(ctx context.Context, chunks []store.Chunk, query string, limit i
 
 	for _, chunk := range chunks {
 		// Filter by path prefix if provided
-		if pathPrefix != "" && !strings.HasPrefix(chunk.FilePath, pathPrefix) {
+		if !store.PathMatchesSearchOptions(chunk.FilePath, opts) {
 			continue
 		}
 

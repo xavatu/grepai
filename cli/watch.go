@@ -469,7 +469,11 @@ func initializeStore(ctx context.Context, cfg *config.Config, projectRoot string
 			collectionName = store.SanitizeCollectionName(projectRoot)
 		}
 		namespace := store.QdrantProjectNamespace(cfg.Store.Qdrant.Collection, projectRoot)
-		return store.NewQdrantStoreWithNamespace(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), namespace, false)
+		return store.NewQdrantStore(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(),
+			store.WithQdrantDenseOnDisk(cfg.Store.Qdrant.DenseVectorsOnDisk()),
+			store.WithQdrantUpsertBatchSize(cfg.Store.Qdrant.UpsertBatchSize),
+			store.WithQdrantEmbeddingCacheNamespace(cfg.Embedder.CacheNamespace()),
+			store.WithQdrantProjectNamespace(namespace))
 	default:
 		return nil, fmt.Errorf("unknown storage backend: %s", cfg.Store.Backend)
 	}
@@ -3188,7 +3192,10 @@ func initializeWorkspaceStore(ctx context.Context, ws *config.Workspace) (store.
 		if collectionName == "" {
 			collectionName = "workspace_" + ws.Name
 		}
-		return store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions())
+		return store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions(),
+			store.WithQdrantDenseOnDisk(ws.Store.Qdrant.DenseVectorsOnDisk()),
+			store.WithQdrantUpsertBatchSize(ws.Store.Qdrant.UpsertBatchSize),
+			store.WithQdrantEmbeddingCacheNamespace(ws.Embedder.CacheNamespace()))
 	default:
 		return nil, fmt.Errorf("unsupported backend for workspace: %s", ws.Store.Backend)
 	}

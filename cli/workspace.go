@@ -263,8 +263,7 @@ func buildWorkspaceFromFlags(name, backend, provider, model, dsn, endpoint, qdra
 		}
 	}
 
-	var storeConfig config.StoreConfig
-	storeConfig.Backend = backend
+	storeConfig := config.DefaultStoreForBackend(backend)
 
 	switch backend {
 	case "postgres":
@@ -319,6 +318,7 @@ func buildWorkspaceFromFlags(name, backend, provider, model, dsn, endpoint, qdra
 		Name:     name,
 		Store:    storeConfig,
 		Embedder: embedderConfig,
+		Reranker: config.DefaultRerankerConfig(),
 		Projects: []config.ProjectEntry{},
 	}, nil
 }
@@ -327,6 +327,7 @@ func buildWorkspaceFromFlags(name, backend, provider, model, dsn, endpoint, qdra
 type WorkspaceFileConfig struct {
 	Store    config.StoreConfig    `yaml:"store" json:"store"`
 	Embedder config.EmbedderConfig `yaml:"embedder" json:"embedder"`
+	Reranker config.RerankerConfig `yaml:"reranker" json:"reranker"`
 }
 
 // buildWorkspaceFromFile loads workspace config from a JSON or YAML file.
@@ -360,6 +361,7 @@ func buildWorkspaceFromFile(name, filePath string) (*config.Workspace, error) {
 		Name:     name,
 		Store:    fileCfg.Store,
 		Embedder: fileCfg.Embedder,
+		Reranker: fileCfg.Reranker,
 		Projects: []config.ProjectEntry{},
 	}, nil
 }
@@ -573,6 +575,7 @@ func createWorkspaceInteractive(workspaceName string) (*config.Workspace, error)
 		Name:     workspaceName,
 		Store:    storeConfig,
 		Embedder: embedderConfig,
+		Reranker: config.DefaultRerankerConfig(),
 		Projects: []config.ProjectEntry{},
 	}, nil
 }

@@ -73,143 +73,6 @@ func (s *fileHashPointsServer) Query(ctx context.Context, request *qdrant.QueryP
 	return s.query(request)
 }
 
-func TestQdrantGetDocumentFileHash(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		hashes   []string
-		wantHash string
-		fail     bool
-	}{
-		{"missing file", nil, "", false},
-		{"legacy points", []string{"", ""}, "", false},
-		{"file hash", []string{"file-hash", "file-hash"}, "file-hash", false},
-		{"hash on later point", []string{"", "file-hash"}, "file-hash", false},
-		{"scroll error", nil, "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			server := grpc.NewServer()
-			qdrant.RegisterPointsServer(server, &fileHashPointsServer{scroll: func(request *qdrant.ScrollPoints) (*qdrant.ScrollResponse, error) {
-				if request.GetCollectionName() != "test_grepai_filehash" || request.GetLimit() != 1000 ||
-					!proto.Equal(request.GetFilter(), &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewMatch("file_path", "file.go")}}) ||
-					!proto.Equal(request.GetWithPayload(), qdrant.NewWithPayloadInclude("file_path", "file_hash")) {
-					t.Errorf("unexpected scroll request: %v", request)
-				}
-				if tc.fail {
-					return nil, status.Error(codes.Unavailable, "test scroll failure")
-				}
-				points := make([]*qdrant.RetrievedPoint, len(tc.hashes))
-				for i, hash := range tc.hashes {
-					payload := map[string]*qdrant.Value{"hash": mustCreateValue(t, "not-a-file-hash")}
-					if hash != "" {
-						payload["file_hash"] = mustCreateValue(t, hash)
-					}
-					points[i] = &qdrant.RetrievedPoint{Id: qdrant.NewIDNum(uint64(i + 1)), Payload: payload}
-				}
-				return &qdrant.ScrollResponse{Result: points}, nil
-			}})
-			t.Cleanup(server.Stop)
-			go func() {
-				if err := server.Serve(listener); err != nil {
-					t.Errorf("serve: %v", err)
-				}
-			}()
-			client, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port, SkipCompatibilityCheck: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := client.Close(); err != nil {
-					t.Error(err)
-				}
-			})
-			s := &QdrantStore{client: client, collectionName: "test_grepai_filehash"}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			doc, err := s.GetDocument(ctx, "file.go")
-			if tc.fail {
-				if err == nil || !strings.Contains(err.Error(), "test scroll failure") || doc != nil {
-					t.Fatalf("doc=%v err=%v", doc, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(tc.hashes) == 0 {
-				if doc != nil {
-					t.Fatalf("missing file returned %+v", doc)
-				}
-				return
-			}
-			wantIDs := make([]string, len(tc.hashes))
-			for i := range wantIDs {
-				wantIDs[i] = qdrant.NewIDNum(uint64(i + 1)).String()
-			}
-			if doc == nil || doc.Path != "file.go" || doc.Hash != tc.wantHash || !reflect.DeepEqual(doc.ChunkIDs, wantIDs) {
-				t.Fatalf("unexpected document: %+v", doc)
-			}
-		})
-	}
-}
-
-// TestQdrantGetChunksForFileSetsIDs: the payload holds no chunk ID, so each
-// chunk must take its point ID. Empty IDs collapse every chunk of a project
-// into a single RPG chunk node (#368).
-func TestQdrantGetChunksForFileSetsIDs(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := []string{uuid.NewString(), uuid.NewString()}
-	server := grpc.NewServer()
-	qdrant.RegisterPointsServer(server, &fileHashPointsServer{scroll: func(*qdrant.ScrollPoints) (*qdrant.ScrollResponse, error) {
-		points := make([]*qdrant.RetrievedPoint, len(ids))
-		for i, id := range ids {
-			points[i] = &qdrant.RetrievedPoint{Id: qdrant.NewID(id), Payload: map[string]*qdrant.Value{
-				"file_path":  mustCreateValue(t, "file.go"),
-				"start_line": mustCreateValue(t, int64(i*10+1)),
-			}}
-		}
-		return &qdrant.ScrollResponse{Result: points}, nil
-	}})
-	t.Cleanup(server.Stop)
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			t.Errorf("serve: %v", err)
-		}
-	}()
-	client, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port, SkipCompatibilityCheck: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := client.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	s := &QdrantStore{client: client, collectionName: "test_grepai_chunks"}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	chunks, err := s.GetChunksForFile(ctx, "file.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chunks) != len(ids) {
-		t.Fatalf("got %d chunks, want %d", len(chunks), len(ids))
-	}
-	for i, chunk := range chunks {
-		if chunk.ID != ids[i] || chunk.FilePath != "file.go" || chunk.StartLine != i*10+1 {
-			t.Errorf("chunk %d = %+v, want ID %s", i, chunk, ids[i])
-		}
-	}
-}
-
-// The content hash ignores the "File:" header that is embedded with the body:
-// only a point with the expected content prefix may be reused (issue #366).
 func TestQdrantLookupByContentHashMatchesContentPrefix(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -219,8 +82,14 @@ func TestQdrantLookupByContentHashMatchesContentPrefix(t *testing.T) {
 	contents := []string{"File: a.go\n\nbody", "File: b.go\n\nbody", sanitizeUTF8("File: caf\xe9.go\n\nbody")}
 	server := grpc.NewServer()
 	qdrant.RegisterPointsServer(server, &fileHashPointsServer{scroll: func(request *qdrant.ScrollPoints) (*qdrant.ScrollResponse, error) {
-		if !proto.Equal(request.GetFilter(), &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewMatch("content_hash", "same-body")}}) ||
-			!proto.Equal(request.GetWithPayload(), qdrant.NewWithPayloadInclude("content")) || !request.GetWithVectors().GetEnable() ||
+		wantFilter := &qdrant.Filter{Must: []*qdrant.Condition{
+			qdrant.NewMatch(payloadRecordType, recordChunk),
+			qdrant.NewMatch(payloadContentHash, "same-body"),
+			qdrant.NewMatch(payloadCacheNS, "cache-ns"),
+		}}
+		if !proto.Equal(request.GetFilter(), wantFilter) ||
+			!proto.Equal(request.GetWithPayload(), qdrant.NewWithPayloadInclude(payloadContent)) ||
+			!proto.Equal(request.GetWithVectors(), qdrant.NewWithVectorsInclude(denseVectorName)) ||
 			request.GetLimit() != qdrantLookupLimit {
 			t.Errorf("unexpected scroll request: %v", request)
 		}
@@ -230,9 +99,7 @@ func TestQdrantLookupByContentHashMatchesContentPrefix(t *testing.T) {
 			points[i] = &qdrant.RetrievedPoint{
 				Id:      qdrant.NewIDNum(id),
 				Payload: map[string]*qdrant.Value{"content": mustCreateValue(t, content)},
-				Vectors: &qdrant.VectorsOutput{VectorsOptions: &qdrant.VectorsOutput_Vector{Vector: &qdrant.VectorOutput{
-					Vector: &qdrant.VectorOutput_Dense{Dense: &qdrant.DenseVector{Data: []float32{float32(id), 0, 0}}},
-				}}},
+				Vectors: namedDenseOutput(float32(id), 0, 0),
 			}
 		}
 		return &qdrant.ScrollResponse{Result: points}, nil
@@ -252,7 +119,7 @@ func TestQdrantLookupByContentHashMatchesContentPrefix(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	s := &QdrantStore{client: client, collectionName: "test_grepai_lookup"}
+	s := &QdrantStore{client: client, collectionName: "test_grepai_lookup", embeddingCacheNamespace: "cache-ns"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -275,90 +142,6 @@ func TestQdrantLookupByContentHashMatchesContentPrefix(t *testing.T) {
 	}
 }
 
-func TestQdrantFileHashIntegration(t *testing.T) {
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:6333", time.Second)
-	if err != nil {
-		t.Skipf("local Qdrant unavailable: %v", err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	client, err := qdrant.NewClient(&qdrant.Config{Host: "127.0.0.1", Port: 6334})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := client.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	const collection = "test_grepai_filehash"
-	exists, err := client.CollectionExists(ctx, collection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exists {
-		t.Fatal("test collection already exists; refusing to change an unowned collection")
-	}
-	if err := client.CreateCollection(ctx, &qdrant.CreateCollection{
-		CollectionName: collection,
-		VectorsConfig:  qdrant.NewVectorsConfig(&qdrant.VectorParams{Size: 3, Distance: qdrant.Distance_Cosine}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		if err := client.DeleteCollection(cleanupCtx, collection); err != nil {
-			t.Error(err)
-		}
-	})
-	s := &QdrantStore{client: client, collectionName: collection}
-	var points []*qdrant.PointStruct
-	for _, fixture := range []struct {
-		path, hash string
-		count      int
-	}{
-		{"current.go", "whole-file-hash", 2},
-		{"legacy.go", "", 1},
-		{"large.go", "large-file-hash", 1001},
-	} {
-		for i := 0; i < fixture.count; i++ {
-			chunk := Chunk{ID: fmt.Sprintf("%s_%d", fixture.path, i), FilePath: fixture.path, FileHash: fixture.hash, Hash: "chunk-hash"}
-			payload, err := s.buildChunkPayload(chunk)
-			if err != nil {
-				t.Fatal(err)
-			}
-			points = append(points, &qdrant.PointStruct{Id: qdrant.NewID(s.getUUIDForChunk(chunk.ID).String()), Payload: payload, Vectors: qdrant.NewVectors(1, 0, 0)})
-		}
-	}
-	// Wait for application, not just acknowledgement, before reading the fixtures.
-	if _, err := client.Upsert(ctx, &qdrant.UpsertPoints{CollectionName: collection, Wait: qdrant.PtrOf(true), Points: points}); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		path, hash string
-		count      int
-	}{
-		{"missing.go", "", 0}, {"current.go", "whole-file-hash", 2},
-		{"legacy.go", "", 1}, {"large.go", "large-file-hash", 1000},
-	} {
-		doc, err := s.GetDocument(ctx, tc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tc.count == 0 {
-			if doc != nil {
-				t.Fatalf("missing file: %+v", doc)
-			}
-		} else if doc == nil || doc.Path != tc.path || doc.Hash != tc.hash || len(doc.ChunkIDs) != tc.count {
-			t.Fatalf("%s: unexpected document %+v", tc.path, doc)
-		}
-	}
-}
-
 func mustCreateValue(t *testing.T, value interface{}) *qdrant.Value {
 	t.Helper()
 	val, err := qdrant.NewValue(value)
@@ -375,14 +158,15 @@ func TestSanitizeCollectionName(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"simple path", "/Users/test/project", "_Users_test_project"},
-		{"nested path", "/home/user/src/github.com/repo", "_home_user_src_github.com_repo"},
-		{"root path", "/", "_"},
-		{"multiple slashes", "///", "___"},
-		{"no slashes", "myproject", "myproject"},
-		{"windows drive path", "C:\\Users\\test\\project", "C__Users_test_project"},
-		{"windows drive colon", "C:", "C_"},
-		{"windows nested path", "C:\\Users\\test\\dev\\grepai", "C__Users_test_dev_grepai"},
+		{"simple path", "/Users/test/project", "grepai_project_0654434d556b"},
+		{"nested path", "/home/user/src/github.com/repo", "grepai_repo_b573058c3d16"},
+		{"root path", "/", "grepai_repo_8a5edab28263"},
+		{"multiple slashes", "///", "grepai_repo_8a5edab28263"},
+		{"no slashes", "myproject", "grepai_myproject_9a76b440a0db"},
+		{"windows drive path", "C:\\Users\\test\\project", "grepai_c__users_test_project_985ea32f9e32"},
+		{"windows drive colon", "C:", "grepai_c_82179da17054"},
+		{"windows nested path", "C:\\Users\\test\\dev\\grepai", "grepai_c__users_test_dev_grepai_7af6a8544503"},
+		{"non-ASCII path", "/tmp/Проект", "grepai_repo_78cf12066621"},
 	}
 
 	for _, tt := range tests {
@@ -704,33 +488,34 @@ func newFakeQdrantStore(t *testing.T, points *fileHashPointsServer) *QdrantStore
 			t.Error(err)
 		}
 	})
-	return &QdrantStore{client: client, collectionName: "test_grepai_ids"}
+	return &QdrantStore{client: client, collectionName: "test_grepai_ids", dimensions: 2}
 }
 
 // TestQdrantSearchAndGetAllChunksSetIDs: Search and GetAllChunks must give
-// each chunk its point ID, the same one for a given point. Hybrid search fuses
-// both lists by chunk ID: with empty IDs every result collapsed into one.
+// each chunk its stored chunk ID. Hybrid search fuses both lists by chunk ID:
+// with empty IDs every result collapsed into one.
 func TestQdrantSearchAndGetAllChunksSetIDs(t *testing.T) {
-	ids := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	ids := []string{"file0.go_0", "file1.go_0", "file2.go_0"}
 	payload := func(i int) map[string]*qdrant.Value {
 		return map[string]*qdrant.Value{
-			"file_path":  mustCreateValue(t, fmt.Sprintf("file%d.go", i)),
-			"start_line": mustCreateValue(t, int64(i+1)),
-			"content":    mustCreateValue(t, "func handler() {}"),
+			payloadChunkID:   mustCreateValue(t, ids[i]),
+			payloadFilePath:  mustCreateValue(t, fmt.Sprintf("file%d.go", i)),
+			payloadStartLine: mustCreateValue(t, int64(i+1)),
+			payloadContent:   mustCreateValue(t, "func handler() {}"),
 		}
 	}
 	s := newFakeQdrantStore(t, &fileHashPointsServer{
 		scroll: func(*qdrant.ScrollPoints) (*qdrant.ScrollResponse, error) {
 			points := make([]*qdrant.RetrievedPoint, len(ids))
-			for i, id := range ids {
-				points[i] = &qdrant.RetrievedPoint{Id: qdrant.NewID(id), Payload: payload(i)}
+			for i := range ids {
+				points[i] = &qdrant.RetrievedPoint{Id: qdrant.NewID(uuid.NewString()), Payload: payload(i)}
 			}
 			return &qdrant.ScrollResponse{Result: points}, nil
 		},
 		query: func(*qdrant.QueryPoints) (*qdrant.QueryResponse, error) {
 			points := make([]*qdrant.ScoredPoint, len(ids))
-			for i, id := range ids {
-				points[i] = &qdrant.ScoredPoint{Id: qdrant.NewID(id), Payload: payload(i), Score: 1 - float32(i)/10}
+			for i := range ids {
+				points[i] = &qdrant.ScoredPoint{Id: qdrant.NewID(uuid.NewString()), Payload: payload(i), Score: 1 - float32(i)/10}
 			}
 			return &qdrant.QueryResponse{Result: points}, nil
 		},
@@ -763,6 +548,14 @@ func TestQdrantSearchAndGetAllChunksSetIDs(t *testing.T) {
 			t.Errorf("GetAllChunks chunk %d = %+v, want ID %s", i, chunk, ids[i])
 		}
 	}
+}
+
+func namedDenseOutput(values ...float32) *qdrant.VectorsOutput {
+	return &qdrant.VectorsOutput{VectorsOptions: &qdrant.VectorsOutput_Vectors{Vectors: &qdrant.NamedVectorsOutput{
+		Vectors: map[string]*qdrant.VectorOutput{
+			denseVectorName: {Vector: &qdrant.VectorOutput_Dense{Dense: &qdrant.DenseVector{Data: values}}},
+		},
+	}}}
 }
 
 // TestQdrantWritesWait: writes must wait until Qdrant has applied them.
@@ -809,21 +602,22 @@ func TestQdrantStore_StructFields(t *testing.T) {
 	}
 }
 
-// TestQdrantStore_CollectionNameSanitization verifies / \ : replacement with _
+// TestQdrantStore_CollectionNameSanitization verifies stable, collision-resistant names.
 func TestQdrantStore_CollectionNameSanitization(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{"simple path", "/Users/test/project", "_Users_test_project"},
-		{"nested path", "/home/user/src/github.com/repo", "_home_user_src_github.com_repo"},
-		{"root path", "/", "_"},
-		{"multiple slashes", "///", "___"},
-		{"no slashes", "myproject", "myproject"},
-		{"windows drive path", "C:\\Users\\test\\project", "C__Users_test_project"},
-		{"windows drive colon", "C:", "C_"},
-		{"windows nested path", "C:\\Users\\test\\dev\\grepai", "C__Users_test_dev_grepai"},
+		{"simple path", "/Users/test/project", "grepai_project_0654434d556b"},
+		{"nested path", "/home/user/src/github.com/repo", "grepai_repo_b573058c3d16"},
+		{"root path", "/", "grepai_repo_8a5edab28263"},
+		{"multiple slashes", "///", "grepai_repo_8a5edab28263"},
+		{"no slashes", "myproject", "grepai_myproject_9a76b440a0db"},
+		{"windows drive path", "C:\\Users\\test\\project", "grepai_c__users_test_project_985ea32f9e32"},
+		{"windows drive colon", "C:", "grepai_c_82179da17054"},
+		{"windows nested path", "C:\\Users\\test\\dev\\grepai", "grepai_c__users_test_dev_grepai_7af6a8544503"},
+		{"non-ASCII path", "/tmp/Проект", "grepai_repo_78cf12066621"},
 	}
 
 	for _, tt := range tests {

@@ -121,6 +121,48 @@ func TestGOBStoreSearchWithPathPrefix(t *testing.T) {
 	}
 }
 
+func TestPathMatchesSearchOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		opts SearchOptions
+		want bool
+	}{
+		{name: "no filter", path: "src/main.go", want: true},
+		{name: "legacy prefix", path: "src/main.go", opts: SearchOptions{PathPrefix: "src/"}, want: true},
+		{name: "legacy prefix rejected", path: "test/main.go", opts: SearchOptions{PathPrefix: "src/"}, want: false},
+		{name: "multiple prefixes use OR", path: "web/main.ts", opts: SearchOptions{PathPrefixes: []string{"api/", "web/"}}, want: true},
+		{name: "explicit prefixes override legacy", path: "legacy/main.go", opts: SearchOptions{PathPrefixes: []string{"src/"}, PathPrefix: "legacy/"}, want: false},
+		{name: "empty explicit entries mean no filter", path: "src/main.go", opts: SearchOptions{PathPrefixes: []string{"", ""}, PathPrefix: "other/"}, want: true},
+		{name: "duplicate prefixes", path: "src/main.go", opts: SearchOptions{PathPrefixes: []string{"src/", "src/"}}, want: true},
+		{name: "slash normalization", path: `src\main.go`, opts: SearchOptions{PathPrefixes: []string{"src/"}}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PathMatchesSearchOptions(tt.path, tt.opts); got != tt.want {
+				t.Fatalf("PathMatchesSearchOptions(%q, %#v) = %v, want %v", tt.path, tt.opts, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizedSearchPathPrefixes(t *testing.T) {
+	got := normalizedSearchPathPrefixes(SearchOptions{
+		PathPrefixes: []string{"web/", "", "api/", "web/"},
+		PathPrefix:   "legacy/",
+	})
+	want := []string{"api/", "web/"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizedSearchPathPrefixes() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("normalizedSearchPathPrefixes() = %#v, want %#v", got, want)
+		}
+	}
+}
+
 // TestPostgresStoreSearchWithPathPrefix tests path prefix filtering in PostgreSQL store
 func TestPostgresStoreSearchWithPathPrefix(t *testing.T) {
 	if testing.Short() {

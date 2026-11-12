@@ -72,42 +72,42 @@ func TestQdrantProjectNamespace(t *testing.T) {
 	}
 }
 
-// Collections without a namespace must keep the point IDs and payloads of
-// earlier versions so that existing indexes are reused as they are.
-func TestQdrantLegacyLayoutUnchanged(t *testing.T) {
-	legacy := &QdrantStore{}
-	want := uuid.NewSHA1(uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), []byte("README.md_0"))
-	if got := legacy.getUUIDForChunk("README.md_0"); got != want {
-		t.Fatalf("legacy point ID changed: got %v, want %v", got, want)
+// Collections without a namespace keep the point IDs and payloads they had
+// before namespaces existed, so existing indexes are reused as they are.
+func TestQdrantUnnamespacedLayoutUnchanged(t *testing.T) {
+	plain := &QdrantStore{}
+	want := uuid.NewSHA1(qdrantUUIDNamespace, []byte("chunk:README.md_0"))
+	if got := plain.getUUIDForChunk("README.md_0"); got != want {
+		t.Fatalf("point ID changed: got %v, want %v", got, want)
 	}
-	payload, err := legacy.buildChunkPayload(Chunk{FilePath: "README.md"})
+	payload, err := plain.buildChunkPayload(Chunk{FilePath: "README.md"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := payload[qdrantNamespaceField]; ok {
-		t.Fatal("legacy payload gained a project namespace")
+		t.Fatal("payload gained a project namespace")
 	}
-	if f := legacy.filter(); f != nil {
-		t.Fatalf("legacy unfiltered read got filter %v", f)
+	if f := plain.filter(); f != nil {
+		t.Fatalf("unfiltered read got filter %v", f)
 	}
-	want1 := &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewMatch("file_path", "README.md")}}
-	if f := legacy.filter(qdrant.NewMatch("file_path", "README.md")); !proto.Equal(f, want1) {
-		t.Fatalf("legacy filter = %v, want %v", f, want1)
-	}
-	if f := legacy.filterWithLegacy(qdrant.NewMatch("file_path", "README.md")); !proto.Equal(f, want1) {
-		t.Fatalf("legacy delete filter = %v, want %v", f, want1)
+	want1 := &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewMatch(payloadFilePath, "README.md")}}
+	if f := plain.filter(qdrant.NewMatch(payloadFilePath, "README.md")); !proto.Equal(f, want1) {
+		t.Fatalf("filter = %v, want %v", f, want1)
 	}
 }
 
 func TestQdrantNamespacedLayout(t *testing.T) {
 	a := &QdrantStore{namespace: "/work/a"}
 	b := &QdrantStore{namespace: "/work/b"}
-	legacy := &QdrantStore{}
+	plain := &QdrantStore{}
 	if a.getUUIDForChunk("README.md_0") == b.getUUIDForChunk("README.md_0") {
 		t.Fatal("two projects got the same point ID for README.md_0")
 	}
-	if a.getUUIDForChunk("README.md_0") == legacy.getUUIDForChunk("README.md_0") {
-		t.Fatal("namespaced point ID collides with the legacy one")
+	if a.getUUIDForChunk("README.md_0") == plain.getUUIDForChunk("README.md_0") {
+		t.Fatal("namespaced point ID collides with the unnamespaced one")
+	}
+	if a.pointUUID(recordDocument, "README.md") == b.pointUUID(recordDocument, "README.md") {
+		t.Fatal("two projects got the same document point ID")
 	}
 	payload, err := a.buildChunkPayload(Chunk{FilePath: "README.md"})
 	if err != nil {
@@ -120,10 +120,14 @@ func TestQdrantNamespacedLayout(t *testing.T) {
 	if f, want := a.filter(), (&qdrant.Filter{Must: []*qdrant.Condition{ns}}); !proto.Equal(f, want) {
 		t.Fatalf("filter = %v, want %v", f, want)
 	}
-	path := qdrant.NewMatch("file_path", "README.md")
-	want := &qdrant.Filter{Must: []*qdrant.Condition{path}, Should: []*qdrant.Condition{ns, qdrant.NewIsEmpty(qdrantNamespaceField)}}
-	if f := a.filterWithLegacy(path); !proto.Equal(f, want) {
-		t.Fatalf("filterWithLegacy = %v, want %v", f, want)
+	search := a.searchFilter(SearchOptions{PathPrefix: "src/"})
+	want := &qdrant.Filter{Must: []*qdrant.Condition{
+		qdrant.NewMatch(payloadRecordType, recordChunk),
+		ns,
+		qdrant.NewMatchPrefix(payloadFilePath, "src/"),
+	}}
+	if !proto.Equal(search, want) {
+		t.Fatalf("search filter = %v, want %v", search, want)
 	}
 }
 
@@ -153,9 +157,8 @@ func qdrantTestClient(t *testing.T) (*qdrant.Client, int) {
 }
 
 // TestQdrantSharedCollectionIsolation reproduces #247 on a real Qdrant: two
-// projects indexing the same explicit collection must not overwrite or delete
-// each other's points, and an index written before namespaces existed must be
-// reused and replaced rather than left behind.
+// projects indexing the same explicit collection must not see, overwrite or
+// delete each other's points or reuse each other's vectors.
 func TestQdrantSharedCollectionIsolation(t *testing.T) {
 	client, port := qdrantTestClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -166,21 +169,25 @@ func TestQdrantSharedCollectionIsolation(t *testing.T) {
 		defer cleanupCancel()
 		_ = client.DeleteCollection(cleanupCtx, collection)
 	})
-	openStore := func(namespace string, legacyReadFallback bool) *QdrantStore {
-		s, err := NewQdrantStoreWithNamespace(ctx, "localhost", port, false, collection, "", 3, namespace, legacyReadFallback)
+	open := func(namespace string) *QdrantStore {
+		t.Helper()
+		s, err := NewQdrantStore(ctx, "localhost", port, false, collection, "", 3, WithQdrantProjectNamespace(namespace))
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = s.Close() })
 		return s
 	}
-	open := func(namespace string) *QdrantStore { return openStore(namespace, false) }
 	save := func(s *QdrantStore, path, content string, vec ...float32) {
 		t.Helper()
 		if err := s.DeleteByFile(ctx, path); err != nil {
 			t.Fatal(err)
 		}
-		chunk := Chunk{ID: path + "_0", FilePath: path, Content: content, Hash: content, ContentHash: "ch-" + content, FileHash: "fh-" + content, Vector: vec, UpdatedAt: time.Now()}
+		chunk := Chunk{ID: path + "_0", FilePath: path, Content: "File: " + path + "\n\n" + content, Hash: content, ContentHash: "ch-" + content, FileHash: "fh-" + content, Vector: vec, UpdatedAt: time.Now()}
 		if err := s.SaveChunks(ctx, []Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SaveDocument(ctx, Document{Path: path, Hash: "fh-" + content, ModTime: time.Now(), ChunkIDs: []string{chunk.ID}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -206,58 +213,20 @@ func TestQdrantSharedCollectionIsolation(t *testing.T) {
 		return out
 	}
 
-	// An earlier release indexed project A into the explicit collection.
-	legacy := open("")
-	save(legacy, "README.md", "victim", 1, 0, 0)
-	save(legacy, "victim_only.go", "secret", 0, 1, 0)
-	save(legacy, "deleted.go", "gone", 0, 0, 1)
-
 	a := open("/work/a")
-	if got := docs(a); len(got) != 0 {
-		t.Fatalf("legacy points are visible to the namespaced store: %v", got)
-	}
-	// Right after upgrading, a search-only store still reads the old index.
-	reader := openStore("/work/a", true)
-	if results, err := reader.Search(ctx, []float32{0, 1, 0}, 1, SearchOptions{}); err != nil || len(results) != 1 || results[0].Chunk.Content != "secret" {
-		t.Fatalf("fallback search = %+v, %v; want the legacy victim_only.go chunk", results, err)
-	}
-	if stats, err := reader.GetStats(ctx); err != nil || stats.TotalFiles != 3 || stats.TotalChunks != 3 {
-		t.Fatalf("fallback stats = %+v, %v", stats, err)
-	}
-	// Re-indexing A reuses the stored vector, then replaces the legacy point.
-	vec, found, err := a.LookupByContentHash(ctx, "ch-victim", "vic")
-	if err != nil || !found || len(vec) != 3 || vec[0] != 1 {
-		t.Fatalf("legacy vector not reused: vec=%v found=%v err=%v", vec, found, err)
-	}
-	// After an embedding model change, legacy vectors must not be reused.
-	rebuilt := open("/work/a")
-	rebuilt.DisableLegacyVectorReuse()
-	if _, found, err := rebuilt.LookupByContentHash(ctx, "ch-victim", "vic"); found || err != nil {
-		t.Fatalf("legacy vector reused after a model change: found=%v err=%v", found, err)
-	}
-	save(a, "README.md", "victim", vec...)
-	save(a, "victim_only.go", "secret", 0, 1, 0)
-	// Once the project has points of its own, the fallback is off.
-	reader = openStore("/work/a", true)
-	if stats, err := reader.GetStats(ctx); err != nil || stats.TotalFiles != 2 {
-		t.Fatalf("stats after migration = %+v, %v; want only the namespaced files", stats, err)
-	}
-
-	// Project B indexes the same collection with its own README.md.
 	b := open("/work/b")
-	if _, found, _ := b.LookupByContentHash(ctx, "ch-victim", "vic"); found {
-		t.Fatal("project B reused project A's namespaced vector")
-	}
+	save(a, "README.md", "victim", 1, 0, 0)
+	save(a, "victim_only.go", "secret", 0, 1, 0)
 	save(b, "README.md", "attacker", 1, 1, 0)
 	if err := b.DeleteByFile(ctx, "victim_only.go"); err != nil { // B never had it
 		t.Fatal(err)
 	}
 
-	if got := contents(a, "README.md"); len(got) != 1 || got[0] != "victim" {
-		t.Fatalf("project A README.md = %v, want [victim]", got)
+	if got := contents(a, "README.md"); len(got) != 1 || got[0] != "File: README.md\n\nvictim" {
+		t.Fatalf("project A README.md = %v", got)
 	}
-	if got := contents(b, "README.md"); len(got) != 1 || got[0] != "attacker" {
-		t.Fatalf("project B README.md = %v, want [attacker]", got)
+	if got := contents(b, "README.md"); len(got) != 1 || got[0] != "File: README.md\n\nattacker" {
+		t.Fatalf("project B README.md = %v", got)
 	}
 	if got := docs(a); fmt.Sprint(got) != "[README.md victim_only.go]" {
 		t.Fatalf("project A documents = %v", got)
@@ -265,38 +234,75 @@ func TestQdrantSharedCollectionIsolation(t *testing.T) {
 	if got := docs(b); fmt.Sprint(got) != "[README.md]" {
 		t.Fatalf("project B documents = %v", got)
 	}
-	results, err := b.Search(ctx, []float32{1, 0, 0}, 10, SearchOptions{})
+	if doc, err := b.GetDocument(ctx, "victim_only.go"); err != nil || doc != nil {
+		t.Fatalf("project B sees project A's document: %+v, %v", doc, err)
+	}
+	results, err := b.SearchHybrid(ctx, "victim secret attacker", []float32{1, 0, 0}, 10, SearchOptions{}, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Chunk.Content != "attacker" {
-		t.Fatalf("project B search returned %+v", results)
+	if len(results) != 1 || results[0].Chunk.FilePath != "README.md" || results[0].Chunk.Hash != "attacker" {
+		t.Fatalf("project B hybrid search returned %+v", results)
 	}
 	stats, err := a.GetStats(ctx)
+	if err != nil || stats.TotalChunks != 2 || stats.TotalFiles != 2 {
+		t.Fatalf("project A stats = %+v, %v", stats, err)
+	}
+	if _, found, _ := b.LookupByContentHash(ctx, "ch-victim", "File: README.md\n\n"); found {
+		t.Fatal("project B reused project A's vector")
+	}
+	if vec, found, err := a.LookupByContentHash(ctx, "ch-victim", "File: README.md\n\n"); err != nil || !found || len(vec) != 3 || vec[0] != 1 {
+		t.Fatalf("project A vector not reused: vec=%v found=%v err=%v", vec, found, err)
+	}
+	if _, found, _ := a.LookupByContentHash(ctx, "ch-victim", "File: moved.md\n\n"); found {
+		t.Fatal("vector embedded under another file path was reused (#366)")
+	}
+
+	// Deleting a file removes its document with its chunks (#356).
+	if err := a.DeleteByFile(ctx, "victim_only.go"); err != nil {
+		t.Fatal(err)
+	}
+	if doc, err := a.GetDocument(ctx, "victim_only.go"); err != nil || doc != nil {
+		t.Fatalf("document left after DeleteByFile: %+v, %v", doc, err)
+	}
+}
+
+// A collection created before project namespaces existed has unnamespaced
+// points: a namespaced store must keep reading them instead of hiding them.
+func TestQdrantPreNamespaceCollectionIgnoresNamespace(t *testing.T) {
+	client, port := qdrantTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	collection := fmt.Sprintf("test_grepai_prens_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_ = client.DeleteCollection(cleanupCtx, collection)
+	})
+	old, err := NewQdrantStore(ctx, "localhost", port, false, collection, "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.TotalChunks != 2 || stats.TotalFiles != 2 {
-		t.Fatalf("project A stats = %+v", stats)
+	defer old.Close()
+	if err := client.UpdateCollection(ctx, &qdrant.UpdateCollection{
+		CollectionName: collection,
+		Metadata:       qdrant.NewValueMap(map[string]any{metadataProjectNamespaces: false}),
+	}); err != nil {
+		t.Fatal(err)
 	}
-	// Legacy vectors serve the indexer's initial scan; once it disables the
-	// reuse after that scan, leftovers (possibly from another model) are not
-	// picked up any more.
-	afterScan := open("/work/a")
-	if _, found, err := afterScan.LookupByContentHash(ctx, "ch-gone", "go"); !found || err != nil {
-		t.Fatalf("initial scan did not reuse the legacy vector: found=%v err=%v", found, err)
+	if err := old.SaveDocument(ctx, Document{Path: "README.md", Hash: "h", ChunkIDs: []string{"README.md_0"}}); err != nil {
+		t.Fatal(err)
 	}
-	afterScan.DisableLegacyVectorReuse()
-	if _, found, err := afterScan.LookupByContentHash(ctx, "ch-gone", "go"); found || err != nil {
-		t.Fatalf("legacy vector reused after the initial scan: found=%v err=%v", found, err)
-	}
-	// Only the legacy point of the file deleted since remains.
-	remaining, err := client.Count(ctx, &qdrant.CountPoints{CollectionName: collection, Exact: qdrant.PtrOf(true),
-		Filter: &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewIsEmpty(qdrantNamespaceField)}}})
+
+	upgraded, err := NewQdrantStore(ctx, "localhost", port, false, collection, "", 3, WithQdrantProjectNamespace("/work/a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remaining != 1 {
-		t.Fatalf("%d legacy points left, want 1 (deleted.go)", remaining)
+	defer upgraded.Close()
+	if upgraded.namespace != "" {
+		t.Fatalf("namespace = %q on a pre-namespace collection, want none", upgraded.namespace)
+	}
+	if doc, err := upgraded.GetDocument(ctx, "README.md"); err != nil || doc == nil {
+		t.Fatalf("existing document hidden: %+v, %v", doc, err)
 	}
 }

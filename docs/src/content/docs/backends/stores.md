@@ -141,7 +141,7 @@ Start Qdrant with the `compose.yaml` file at the root of the grepai repository:
 docker compose --profile qdrant up -d
 ```
 
-It exposes the HTTP API and dashboard on port 6333 (`http://localhost:6333/dashboard`) and gRPC on port 6334.
+grepai needs Qdrant 1.19 or newer for native BM25 and collection metadata; the Compose service is pinned to such a version. It exposes the HTTP API and dashboard on port 6333 (`http://localhost:6333/dashboard`) and gRPC on port 6334.
 
 Then initialize grepai:
 
@@ -162,6 +162,8 @@ store:
     use_tls: false           # true for Qdrant Cloud
     collection: myproject    # optional
     api_key: ""              # optional, for Qdrant Cloud
+    dense_on_disk: true      # serve original dense vectors from disk
+    upsert_batch_size: 128   # points per synchronous write
 ```
 
 | Key | Default | Description |
@@ -169,8 +171,10 @@ store:
 | `endpoint` | `localhost` | Qdrant host. A scheme (`http://`, `https://`), port or path in this value is ignored |
 | `port` | `6334` | gRPC port |
 | `use_tls` | `false` | Enables TLS. This is the only setting that turns TLS on |
-| `collection` | project path | Collection name. If empty, grepai uses the absolute project path with `/`, `\` and `:` replaced by `_` (`workspace_<name>` for a workspace) |
+| `collection` | project path | Collection name. If empty, grepai uses `grepai_<directory>_<hash>`, built from the project directory name and a hash of its canonical path (`workspace_<name>` for a workspace) |
 | `api_key` | empty | API key sent to Qdrant |
+| `dense_on_disk` | `true` | Stores the original dense vectors on disk in collections grepai creates. It has no effect on an existing collection |
+| `upsert_batch_size` | `128` | Points per synchronous write |
 
 **Local Qdrant:**
 
@@ -195,7 +199,9 @@ store:
     api_key: your-api-key
 ```
 
-When the collection does not exist, grepai creates it with cosine distance and the embedder's dimensions. An existing collection is never resized: after changing to a model with different dimensions, delete the collection (from the dashboard or the Qdrant API) or set a new `collection` name, then run `grepai index` or `grepai watch`.
+When the collection does not exist, grepai creates it with a named cosine dense vector sized for the embedder, a `bm25` sparse vector with IDF weighting and keyword payload indexes. An existing collection is never changed or migrated: at startup grepai checks its schema version, embedding dimensions and embedding model and stops with an error on a mismatch. After changing the embedding model, or for a collection created by a grepai version without this schema, delete the collection (from the dashboard or the Qdrant API) or set a new `collection` name, then run `grepai index` or `grepai watch`.
+
+With `search.hybrid.enabled: true`, Qdrant runs dense similarity, native BM25, path filtering and RRF fusion itself, so grepai does not load the corpus into memory.
 
 ### Sharing a Collection
 
@@ -208,21 +214,15 @@ When `collection` is set, several projects can point at the same collection. Eac
 
 Collections named after the project path (`collection` empty) and workspace collections hold a single project and have no namespace.
 
-Collections set explicitly and indexed before this change hold points without a namespace. Until the project has points of its own, `grepai search`, `grepai status` and the MCP tools keep reading those points, as earlier versions did (in a collection shared by several projects, that includes the other projects' old points). The first `grepai index` or `grepai watch` after upgrading re-indexes the project: unchanged chunks reuse the stored vectors, and the old points of each re-indexed file are deleted. Old vectors are only reused during the initial scan of `grepai index` or `grepai watch` (not by a running watcher afterwards, and not when the embedding model changed). While that first run is in progress, or if it is interrupted, search and status only see the files migrated so far, until the migration finishes. grepai warns at startup while old points remain (files deleted since, or other projects sharing the collection). Once every project sharing the collection runs the new version and has been re-indexed, the remaining old points are orphans; remove them with the Qdrant REST API (port 6333):
-
-```bash
-curl -X POST http://localhost:6333/collections/<collection>/points/delete \
-  -H 'Content-Type: application/json' \
-  -d '{"filter": {"must": [{"is_empty": {"key": "project_namespace"}}]}}'
-```
-
-An earlier grepai release ignores the namespace and sees every project's points: while one project sharing the collection still runs it, that project can overwrite or delete the other projects' points, so upgrade every project that uses the collection.
+A collection created before project namespaces existed keeps its layout: its points carry no namespace, and projects that share it see and overwrite each other's points. To keep them apart, delete the collection or set a new `collection` name, then re-index each project. A grepai build without namespace support ignores the namespace, so upgrade every project that uses a shared collection.
 
 ### Characteristics
 
 - **Dedicated vector database:** search runs inside Qdrant.
 - **Shared index:** several machines, worktrees or projects can use the same server, with one collection per project by default.
 - **Requires a Qdrant server** (Docker, a binary or Qdrant Cloud).
+- **Native hybrid search:** dense similarity and BM25 are fused inside Qdrant.
+- **Server-side path filtering** and paginated metadata reads.
 
 ### Best For
 

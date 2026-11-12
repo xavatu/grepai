@@ -471,7 +471,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 		namespace := store.QdrantProjectNamespace(cfg.Store.Qdrant.Collection, projectRoot)
 		var err error
-		st, err = store.NewQdrantStoreWithNamespace(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), namespace, true)
+		st, err = store.NewQdrantStore(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(),
+			store.WithQdrantDenseOnDisk(cfg.Store.Qdrant.DenseVectorsOnDisk()),
+			store.WithQdrantUpsertBatchSize(cfg.Store.Qdrant.UpsertBatchSize),
+			store.WithQdrantEmbeddingCacheNamespace(cfg.Embedder.CacheNamespace()),
+			store.WithQdrantProjectNamespace(namespace))
 		if err != nil {
 			return fmt.Errorf("failed to connect to qdrant: %w", err)
 		}

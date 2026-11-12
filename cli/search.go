@@ -13,6 +13,7 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
 	"github.com/yoanbernabeu/grepai/internal/toon"
+	"github.com/yoanbernabeu/grepai/reranker"
 	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/stats"
@@ -256,7 +257,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 		namespace := store.QdrantProjectNamespace(cfg.Store.Qdrant.Collection, projectRoot)
 		var err error
-		st, err = store.NewQdrantStoreWithNamespace(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), namespace, true)
+		st, err = store.NewQdrantStore(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(),
+			store.WithQdrantDenseOnDisk(cfg.Store.Qdrant.DenseVectorsOnDisk()),
+			store.WithQdrantUpsertBatchSize(cfg.Store.Qdrant.UpsertBatchSize),
+			store.WithQdrantEmbeddingCacheNamespace(cfg.Embedder.CacheNamespace()),
+			store.WithQdrantProjectNamespace(namespace))
 		if err != nil {
 			return fmt.Errorf("failed to connect to qdrant: %w", err)
 		}
@@ -266,7 +271,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	defer st.Close()
 
 	// Create searcher with boost config
-	searcher := search.NewSearcher(st, emb, cfg.Search)
+	searcher := search.NewSearcher(st, emb, cfg.Search,
+		search.WithReranker(reranker.NewFromConfig(cfg.Reranker), cfg.Reranker.Candidates))
 
 	normalizedPath, err := search.NormalizeProjectPathPrefix(searchPath, projectRoot)
 	if err != nil {
@@ -545,7 +551,10 @@ func runWorkspaceSearch(ctx context.Context, query string, projects []string, pa
 		if collectionName == "" {
 			collectionName = "workspace_" + ws.Name
 		}
-		st, err = store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions())
+		st, err = store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions(),
+			store.WithQdrantDenseOnDisk(ws.Store.Qdrant.DenseVectorsOnDisk()),
+			store.WithQdrantUpsertBatchSize(ws.Store.Qdrant.UpsertBatchSize),
+			store.WithQdrantEmbeddingCacheNamespace(ws.Embedder.CacheNamespace()))
 		if err != nil {
 			return fmt.Errorf("failed to connect to qdrant: %w", err)
 		}
@@ -554,28 +563,26 @@ func runWorkspaceSearch(ctx context.Context, query string, projects []string, pa
 	}
 	defer st.Close()
 
-	// Create searcher with default search config
+	// Enable native hybrid retrieval when the workspace uses Qdrant.
 	searchCfg := config.SearchConfig{
-		Hybrid: config.HybridConfig{Enabled: false, K: 60},
+		Hybrid: config.HybridConfig{Enabled: ws.Store.Backend == "qdrant", K: 60},
 		Boost:  config.DefaultConfig().Search.Boost,
+		Dedup:  config.DefaultConfig().Search.Dedup,
 	}
-	searcher := search.NewSearcher(st, emb, searchCfg)
+	searcher := search.NewSearcher(st, emb, searchCfg,
+		search.WithReranker(reranker.NewFromConfig(ws.Reranker), ws.Reranker.Candidates))
 
-	// Construct full path prefix for database query
-	// Database stores paths as: workspaceName/projectName/relativePath
-	// When a single project is specified, include it in the path prefix to push filtering to database level
-	fullPathPrefix := ws.Name + "/"
-	if len(resolvedProjects) == 1 {
-		// If exactly one project specified, include it in the path prefix for database-level filtering
-		// This ensures file_path LIKE 'workspace/project/%' filter is applied
-		fullPathPrefix += resolvedProjects[0] + "/"
+	allProjects := make([]string, 0, len(ws.Projects))
+	for _, project := range ws.Projects {
+		allProjects = append(allProjects, project.Name)
 	}
-	if normalizedPath != "" {
-		fullPathPrefix += normalizedPath
+	// No prefix means the path lies outside the selected projects: an empty
+	// filter would search the whole workspace instead.
+	var results []store.SearchResult
+	prefixes := search.WorkspacePathPrefixes(ws.Name, resolvedProjects, allProjects, normalizedPath)
+	if len(prefixes) > 0 {
+		results, err = searcher.SearchWithOptions(ctx, query, searchLimit, store.SearchOptions{PathPrefixes: prefixes})
 	}
-
-	// Search
-	results, err := searcher.Search(ctx, query, searchLimit, fullPathPrefix)
 	if err != nil {
 		if searchJSON {
 			return outputSearchErrorJSON(err)
@@ -584,23 +591,6 @@ func runWorkspaceSearch(ctx context.Context, query string, projects []string, pa
 			return outputSearchErrorTOON(err)
 		}
 		return fmt.Errorf("search failed: %w", err)
-	}
-
-	// Filter by projects if specified (additional client-side filtering for multiple projects)
-	// File paths are stored as: workspaceName/projectName/relativePath
-	if len(resolvedProjects) > 0 {
-		filteredResults := make([]store.SearchResult, 0)
-		for _, r := range results {
-			for _, projectName := range resolvedProjects {
-				// Match workspace/project/ prefix
-				expectedPrefix := ws.Name + "/" + projectName + "/"
-				if strings.HasPrefix(r.Chunk.FilePath, expectedPrefix) {
-					filteredResults = append(filteredResults, r)
-					break
-				}
-			}
-		}
-		results = filteredResults
 	}
 
 	// Workspace mode doesn't have RPG enrichment (no single projectRoot)

@@ -40,7 +40,7 @@ Query: "handleAuth authentication"
 ```
 
 1. **Vector search**: the usual semantic search through the store.
-2. **Text search**: keyword matching over every indexed chunk.
+2. **Text search**: native BM25 on Qdrant, keyword matching over every indexed chunk on other stores.
 3. **RRF fusion**: both rankings are merged into one list.
 4. **Boost and dedup**: [structural boost](/grepai/search-boost/) and `search.dedup` are then applied to the fused list, as in a normal search.
 
@@ -81,9 +81,11 @@ Enable hybrid search when:
 
 ## Performance Note
 
-On every query, hybrid search loads all chunks from the store (`GetAllChunks`) and scans their text in memory. On large indexes, or with a remote PostgreSQL or Qdrant store, this adds latency and memory use.
+With Qdrant, dense retrieval, BM25, path filtering and RRF fusion all run inside Qdrant, so grepai does not load the corpus into memory. This is the recommended mode for large repositories.
 
-Consider keeping it disabled for:
+On GOB and PostgreSQL, hybrid search loads all chunks from the store (`GetAllChunks`) on every query and scans their text in memory. On large indexes, or with a remote PostgreSQL store, this adds latency and memory use.
+
+Consider keeping it disabled on these stores for:
 - Very large monorepos
 - Purely semantic queries (no identifiers)
 - Latency-sensitive use, such as an agent that runs many searches
@@ -92,7 +94,9 @@ Consider keeping it disabled for:
 
 ### Text Search
 
-Simple keyword matching, no stemming or ranking model:
+Qdrant uses its native `qdrant/bm25` sparse model with a word tokenizer, IDF weighting and no stemming or stop words.
+
+Other stores use simple keyword matching, no stemming or ranking model:
 - The query is lowercased and split on whitespace. Words shorter than 2 characters are dropped.
 - A chunk matches a word if its lowercased content contains that word as a substring.
 - Score = number of matched words / number of query words. Chunks with no match are excluded.

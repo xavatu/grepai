@@ -20,15 +20,64 @@ services:
 
   # Optional: Qdrant for vector storage
   qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant_local
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
     ports:
-      - "6333:6333" # API HTTP & Dashboard
-      - "6334:6334" # API gRPC
+      - "127.0.0.1:6333:6333" # API HTTP & Dashboard
+      - "127.0.0.1:6334:6334" # API gRPC
     volumes:
-      - ./qdrant_storage:/qdrant/storage:z
+      - grepai-qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     profiles:
       - qdrant
+
+  # Optional: CUDA-accelerated second-stage reranker
+  reranker:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b11058
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - grepai-reranker-cache:/root/.cache/huggingface
+    command:
+      - --hf-repo
+      - ebasKing/Qwen3-Reranker-4B-GGUF-llama_cpp
+      - --hf-file
+      - Qwen3-Reranker-4B-Q6_K.gguf
+      - --embedding
+      - --reranking
+      - --pooling
+      - rank
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "8192"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --parallel
+      - "4"
+      - --n-gpu-layers
+      - "99"
+      - --flash-attn
+      - on
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 2m
+    profiles:
+      - reranker
 
   # Optional: Ollama for local embeddings (Linux only)
   # Uncomment the following to run Ollama in Docker
@@ -50,4 +99,6 @@ services:
 
 volumes:
   grepai-pgdata:
+  grepai-qdrant:
+  grepai-reranker-cache:
   # grepai-ollama:

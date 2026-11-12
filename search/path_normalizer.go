@@ -99,6 +99,52 @@ func NormalizeWorkspacePathPrefix(pathPrefix string, ws *config.Workspace, selec
 	return best.rel, []string{best.projectName}, nil
 }
 
+// WorkspacePathPrefixes builds the stored path prefixes of a workspace search.
+// Workspace chunks are stored as workspace/project/relative-path. With exactly
+// one selected project the path is relative to it; otherwise it starts with
+// the project name, as in the CLI. Results stay limited to the selected
+// projects, or to all workspace projects when none is selected. An empty
+// result means that the path lies outside every candidate project.
+func WorkspacePathPrefixes(workspaceName string, selectedProjects, allProjects []string, normalizedPath string) []string {
+	normalizedPath = filepath.ToSlash(strings.ReplaceAll(normalizedPath, `\`, "/"))
+	if len(selectedProjects) == 1 {
+		return []string{workspaceName + "/" + selectedProjects[0] + "/" + normalizedPath}
+	}
+	pathPrefix := workspaceName + "/" + normalizedPath
+	candidates := selectedProjects
+	if len(candidates) == 0 {
+		candidates = allProjects
+	}
+	if len(candidates) == 0 {
+		return []string{pathPrefix}
+	}
+	prefixes := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, project := range candidates {
+		if project == "" {
+			continue
+		}
+		// Keep the narrower of the path and the project prefix, or skip the
+		// project when the path points into another one.
+		projectPrefix := workspaceName + "/" + project + "/"
+		var prefix string
+		switch {
+		case strings.HasPrefix(pathPrefix, projectPrefix):
+			prefix = pathPrefix
+		case strings.HasPrefix(projectPrefix, pathPrefix):
+			prefix = projectPrefix
+		default:
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
+}
+
 func normalizeForPathMatch(path string) string {
 	if path == "" {
 		return ""

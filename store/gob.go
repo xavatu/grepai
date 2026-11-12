@@ -87,7 +87,7 @@ func (s *GOBStore) Search(ctx context.Context, queryVector []float32, limit int,
 
 	for _, chunk := range s.chunks {
 		// Filter by path prefix if provided
-		if opts.PathPrefix != "" && !strings.HasPrefix(chunk.FilePath, opts.PathPrefix) {
+		if !PathMatchesSearchOptions(chunk.FilePath, opts) {
 			continue
 		}
 		score := cosineSimilarity(queryVector, chunk.Vector)

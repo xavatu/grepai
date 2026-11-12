@@ -64,10 +64,11 @@ In workspace mode, an absolute path also selects the matching project.
 
 1. **Query embedding**: grepai converts your query to a vector with the embedder configured in `.grepai/config.yaml`.
 2. **Similarity search**: the store returns the closest chunks. It fetches more candidates than `--limit` (2x, or 4x when `search.dedup` is enabled) so the next steps have room to reorder.
-3. **Hybrid fusion (optional)**: if `search.hybrid.enabled` is true, vector results are merged with keyword matches. See [Hybrid Search](/grepai/hybrid-search/).
-4. **Boost**: scores are multiplied by path-based factors (tests and docs down, some source directories up). See [Search Boost](/grepai/search-boost/).
-5. **Deduplication**: if `search.dedup.enabled` is true, only the best chunk per file is kept.
-6. **Limit**: the top `--limit` results are returned.
+3. **Hybrid fusion (optional)**: if `search.hybrid.enabled` is true, vector results are merged with keyword matches. On Qdrant, the fusion runs inside Qdrant with native BM25. See [Hybrid Search](/grepai/hybrid-search/).
+4. **Reranking (optional)**: if `reranker.enabled` is true, grepai fetches `reranker.candidates` chunks instead (4x when `search.dedup` is enabled, then one per file), and a neural reranker rescores them. If the reranker is unavailable, the retrieval order is kept. See [Neural Reranking](/grepai/configuration/#neural-reranking-disabled-by-default).
+5. **Boost**: scores are multiplied by path-based factors (tests and docs down, some source directories up). See [Search Boost](/grepai/search-boost/).
+6. **Deduplication**: if `search.dedup.enabled` is true, only the best chunk per file is kept.
+7. **Limit**: the top `--limit` results are returned.
 
 ### Writing Effective Queries
 

@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -35,7 +38,64 @@ type SearchResult struct {
 
 // SearchOptions contains optional filters for vector search queries.
 type SearchOptions struct {
+	// PathPrefixes is the canonical list of accepted file path prefixes. A
+	// result matches when its path starts with any prefix in the list.
+	PathPrefixes []string
+	// PathPrefix is retained as a backwards-compatible shorthand. Stores use
+	// it only when PathPrefixes is empty.
 	PathPrefix string
+}
+
+// PathMatchesSearchOptions reports whether filePath matches the configured
+// prefix filter. Multiple prefixes use OR semantics.
+func PathMatchesSearchOptions(filePath string, opts SearchOptions) bool {
+	prefixes := normalizedSearchPathPrefixes(opts)
+	if len(prefixes) == 0 {
+		return true
+	}
+	filePath = normalizeSearchPath(filePath)
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(filePath, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizedSearchPathPrefixes returns the effective path-prefix filter shared
+// by all stores. Explicit PathPrefixes take precedence over the legacy field;
+// empty entries are ignored and duplicates are removed.
+func normalizedSearchPathPrefixes(opts SearchOptions) []string {
+	prefixes := opts.PathPrefixes
+	if len(prefixes) == 0 && opts.PathPrefix != "" {
+		prefixes = []string{opts.PathPrefix}
+	}
+	seen := make(map[string]struct{}, len(prefixes))
+	result := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefix = normalizeSearchPath(prefix)
+		if prefix == "" {
+			continue
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		result = append(result, prefix)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func normalizeSearchPath(path string) string {
+	return filepath.ToSlash(strings.ReplaceAll(path, `\`, "/"))
+}
+
+// NativeHybridStore is implemented by stores that can execute dense and
+// lexical retrieval plus rank fusion without loading the full corpus into the
+// grepai process.
+type NativeHybridStore interface {
+	SearchHybrid(ctx context.Context, query string, queryVector []float32, limit int, opts SearchOptions, rrfK float32) ([]SearchResult, error)
 }
 
 // IndexStats contains statistics about the index

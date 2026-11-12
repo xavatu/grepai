@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
 	"github.com/yoanbernabeu/grepai/internal/toon"
+	"github.com/yoanbernabeu/grepai/reranker"
 	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/stats"
@@ -34,6 +36,21 @@ type Server struct {
 	projectRoot   string
 	workspaceName string // non-empty when started via --workspace or auto-detect
 	recorder      *stats.Recorder
+	storeMu       sync.Mutex
+	qdrantStores  map[qdrantStoreKey]*store.QdrantStore
+}
+
+type qdrantStoreKey struct {
+	endpoint       string
+	port           int
+	useTLS         bool
+	collection     string
+	apiKey         string
+	dimensions     int
+	denseOnDisk    bool
+	upsertBatch    int
+	cacheNamespace string
+	namespace      string
 }
 
 // SearchResult is a lightweight struct for MCP output.
@@ -535,10 +552,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to initialize store: %v", err)), nil
 	}
-	defer st.Close()
+	defer s.releaseStore(st)
 
 	// Create searcher and search
-	searcher := search.NewSearcher(st, emb, cfg.Search)
+	searcher := search.NewSearcher(st, emb, cfg.Search,
+		search.WithReranker(reranker.NewFromConfig(cfg.Reranker), cfg.Reranker.Candidates))
 	normalizedPath, err := search.NormalizeProjectPathPrefix(path, projectPathToUse)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid path parameter: %v", err)), nil
@@ -667,53 +685,27 @@ func (s *Server) handleWorkspaceSearch(ctx context.Context, query string, limit 
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to initialize store: %v", err)), nil
 	}
-	defer st.Close()
+	defer s.releaseStore(st)
 
-	// Create searcher with default config
+	// Qdrant provides native dense + BM25 retrieval. Other workspace stores
+	// retain dense-only behavior to avoid loading the entire workspace corpus.
 	searchCfg := config.SearchConfig{
-		Hybrid: config.HybridConfig{Enabled: false, K: 60},
+		Hybrid: config.HybridConfig{Enabled: ws.Store.Backend == "qdrant", K: 60},
 		Boost:  config.DefaultConfig().Search.Boost,
+		Dedup:  config.DefaultConfig().Search.Dedup,
 	}
-	searcher := search.NewSearcher(st, emb, searchCfg)
+	searcher := search.NewSearcher(st, emb, searchCfg,
+		search.WithReranker(reranker.NewFromConfig(ws.Reranker), ws.Reranker.Candidates))
 
-	// Construct full path prefix for database query. Database stores paths as:
-	// workspaceName/projectName/relativePath. With a single project, the path is
-	// relative to that project; otherwise it starts with the project name
-	// (same semantics as the CLI).
-	fullPathPrefix := ws.Name + "/"
-	singleProject := ""
-	if len(resolvedProjects) == 1 {
-		singleProject = resolvedProjects[0]
-		fullPathPrefix += singleProject + "/"
-	}
-
-	// Add path prefix if provided
-	if normalizedPath != "" {
-		fullPathPrefix += normalizedPath
-	}
-
-	// Search
+	// No prefix means the path lies outside the selected projects: an empty
+	// filter would search the whole workspace instead.
 	var results []store.SearchResult
-	results, err = searcher.Search(ctx, query, limit, fullPathPrefix)
+	prefixes := search.WorkspacePathPrefixes(ws.Name, resolvedProjects, listWorkspaceProjectNames(ws.Projects), normalizedPath)
+	if len(prefixes) > 0 {
+		results, err = searcher.SearchWithOptions(ctx, query, limit, store.SearchOptions{PathPrefixes: prefixes})
+	}
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
-	}
-
-	// Filter by projects if specified
-	// File paths are stored as: workspaceName/projectName/relativePath
-	if len(resolvedProjects) > 0 {
-		filteredResults := make([]store.SearchResult, 0)
-		for _, r := range results {
-			for _, projectName := range resolvedProjects {
-				// Match workspace/project/ prefix
-				expectedPrefix := ws.Name + "/" + projectName + "/"
-				if strings.HasPrefix(r.Chunk.FilePath, expectedPrefix) {
-					filteredResults = append(filteredResults, r)
-					break
-				}
-			}
-		}
-		results = filteredResults
 	}
 
 	if normalizedPath != "" && len(results) == 0 {
@@ -1067,7 +1059,7 @@ func (s *Server) createWorkspaceStore(ctx context.Context, ws *config.Workspace)
 		if collectionName == "" {
 			collectionName = "workspace_" + ws.Name
 		}
-		return store.NewQdrantStore(ctx, ws.Store.Qdrant.Endpoint, ws.Store.Qdrant.Port, ws.Store.Qdrant.UseTLS, collectionName, ws.Store.Qdrant.APIKey, ws.Embedder.GetDimensions())
+		return s.qdrantStore(ctx, ws.Store.Qdrant, collectionName, ws.Embedder, "")
 	default:
 		return nil, fmt.Errorf("unsupported backend for workspace: %s", ws.Store.Backend)
 	}
@@ -1951,7 +1943,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcp.CallToolRequ
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to initialize store: %v", err)), nil
 	}
-	defer st.Close()
+	defer s.releaseStore(st)
 
 	// Get stats
 	stats, err := st.GetStats(ctx)
@@ -2114,7 +2106,7 @@ func (s *Server) createStore(ctx context.Context, cfg *config.Config) (store.Vec
 			collectionName = store.SanitizeCollectionName(s.projectRoot)
 		}
 		namespace := store.QdrantProjectNamespace(cfg.Store.Qdrant.Collection, s.projectRoot)
-		return store.NewQdrantStoreWithNamespace(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), namespace, true)
+		return s.qdrantStore(ctx, cfg.Store.Qdrant, collectionName, cfg.Embedder, namespace)
 	default:
 		return nil, fmt.Errorf("unknown storage backend: %s", cfg.Store.Backend)
 	}
@@ -2140,7 +2132,7 @@ func (s *Server) createStoreForRoot(ctx context.Context, cfg *config.Config, pro
 			collectionName = store.SanitizeCollectionName(projectRoot)
 		}
 		namespace := store.QdrantProjectNamespace(cfg.Store.Qdrant.Collection, projectRoot)
-		return store.NewQdrantStoreWithNamespace(ctx, cfg.Store.Qdrant.Endpoint, cfg.Store.Qdrant.Port, cfg.Store.Qdrant.UseTLS, collectionName, cfg.Store.Qdrant.APIKey, cfg.Embedder.GetDimensions(), namespace, true)
+		return s.qdrantStore(ctx, cfg.Store.Qdrant, collectionName, cfg.Embedder, namespace)
 	default:
 		return nil, fmt.Errorf("unknown storage backend: %s", cfg.Store.Backend)
 	}
@@ -2187,6 +2179,7 @@ func effectiveProjectRoot(serverRoot, rootOverride string) string {
 
 // Serve starts the MCP server using stdio transport.
 func (s *Server) Serve() error {
+	defer s.Close()
 	// Create stdio server with title fix wrapper
 	stdioServer := server.NewStdioServer(s.mcpServer)
 
@@ -2196,6 +2189,63 @@ func (s *Server) Serve() error {
 	// Start listening with fixed stdout
 	ctx := context.Background()
 	return stdioServer.Listen(ctx, os.Stdin, fixedStdout)
+}
+
+func (s *Server) qdrantStore(ctx context.Context, cfg config.QdrantConfig, collection string, embCfg config.EmbedderConfig, namespace string) (*store.QdrantStore, error) {
+	key := qdrantStoreKey{
+		endpoint:       cfg.Endpoint,
+		port:           cfg.Port,
+		useTLS:         cfg.UseTLS,
+		collection:     collection,
+		apiKey:         cfg.APIKey,
+		dimensions:     embCfg.GetDimensions(),
+		denseOnDisk:    cfg.DenseVectorsOnDisk(),
+		upsertBatch:    cfg.UpsertBatchSize,
+		cacheNamespace: embCfg.CacheNamespace(),
+		namespace:      namespace,
+	}
+
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	if cached := s.qdrantStores[key]; cached != nil {
+		return cached, nil
+	}
+	st, err := store.NewQdrantStore(ctx, cfg.Endpoint, cfg.Port, cfg.UseTLS, collection, cfg.APIKey, embCfg.GetDimensions(),
+		store.WithQdrantDenseOnDisk(key.denseOnDisk),
+		store.WithQdrantUpsertBatchSize(cfg.UpsertBatchSize),
+		store.WithQdrantEmbeddingCacheNamespace(key.cacheNamespace),
+		store.WithQdrantProjectNamespace(namespace))
+	if err != nil {
+		return nil, err
+	}
+	if s.qdrantStores == nil {
+		s.qdrantStores = make(map[qdrantStoreKey]*store.QdrantStore)
+	}
+	s.qdrantStores[key] = st
+	return st, nil
+}
+
+func (s *Server) releaseStore(st store.VectorStore) {
+	if _, cached := st.(*store.QdrantStore); cached {
+		return
+	}
+	if err := st.Close(); err != nil {
+		log.Printf("Warning: failed to close vector store: %v", err)
+	}
+}
+
+// Close releases long-lived Qdrant connections owned by the MCP server.
+func (s *Server) Close() error {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	var firstErr error
+	for key, st := range s.qdrantStores {
+		if err := st.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(s.qdrantStores, key)
+	}
+	return firstErr
 }
 
 // titleFixWriter wraps io.Writer to fix tool titles in responses

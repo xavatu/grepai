@@ -25,6 +25,7 @@ type Workspace struct {
 	Name     string         `yaml:"name"`
 	Store    StoreConfig    `yaml:"store"`
 	Embedder EmbedderConfig `yaml:"embedder"`
+	Reranker RerankerConfig `yaml:"reranker,omitempty"`
 	// Chunking provides workspace-level defaults. Currently only
 	// CustomExtensions is consumed; Size/Overlap/Strategy are taken from the
 	// per-project config.
@@ -81,6 +82,16 @@ func LoadWorkspaceConfig() (*WorkspaceConfig, error) {
 	// Apply defaults
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = make(map[string]Workspace)
+	}
+	for name, ws := range cfg.Workspaces {
+		if ws.Store.Backend == "qdrant" {
+			ws.Store.Qdrant.applyDefaults()
+		}
+		ws.Reranker.applyDefaults()
+		if err := ValidateRerankerConfig(ws.Reranker); err != nil {
+			return nil, fmt.Errorf("invalid reranker configuration for workspace %q: %w", name, err)
+		}
+		cfg.Workspaces[name] = ws
 	}
 
 	return &cfg, nil

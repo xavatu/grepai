@@ -2,11 +2,16 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,43 +25,51 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// sanitizeUTF8 ensures the string contains only valid UTF-8 characters.
-// Invalid sequences are replaced with the Unicode replacement character.
-func sanitizeUTF8(s string) string {
-	if utf8.ValidString(s) {
-		return s
-	}
-	return strings.ToValidUTF8(s, "\uFFFD")
-}
+const (
+	qdrantSchemaVersion = 2
+	denseVectorName     = "dense"
+	bm25VectorName      = "bm25"
+	metadataVectorName  = "metadata"
+	bm25ModelName       = "qdrant/bm25"
+	defaultUpsertBatch  = 128
+	defaultScrollPage   = 512
 
-type QdrantStore struct {
-	client         *qdrant.Client
-	collectionName string
-	dimensions     int
-	apiKey         string
-	address        string // host:port, for error messages
-	// namespace scopes every point to one project inside a collection that
-	// several projects may share. Empty keeps the layout of collections named
-	// after the project path: point IDs and payloads exactly as before (#247).
-	namespace string
-	// noLegacyVectors stops the embedding cache from reusing vectors of
-	// points without a namespace, which carry no model information: the
-	// indexer sets it after its initial scan and after a model change.
-	noLegacyVectors bool
-	// migrating is set when the store opened on a namespace without points:
-	// the project has not been indexed since points got a namespace.
-	migrating bool
-	// readLegacy makes search and status read the points an earlier version
-	// wrote without a namespace, while the project has none of its own yet
-	// (just after upgrading, before it is re-indexed). The indexer never sets
-	// it, so it still sees an empty namespace and re-indexes the project.
-	readLegacy bool
-}
+	// qdrantLookupLimit bounds the points (and vectors) read by one
+	// LookupByContentHash call.
+	qdrantLookupLimit = 64
 
-// qdrantNamespaceField is the payload field holding a point's project
-// namespace. Points written without a namespace (default collections, or
-// explicit collections indexed before #247) do not have it.
-const qdrantNamespaceField = "project_namespace"
+	payloadRecordType    = "record_type"
+	payloadChunkID       = "chunk_id"
+	payloadFilePath      = "file_path"
+	payloadStartLine     = "start_line"
+	payloadEndLine       = "end_line"
+	payloadContent       = "content"
+	payloadHash          = "hash"
+	payloadFileHash      = "file_hash"
+	payloadContentHash   = "content_hash"
+	payloadCacheNS       = "embedding_cache_namespace"
+	payloadUpdatedAt     = "updated_at"
+	payloadDocumentHash  = "document_hash"
+	payloadDocumentMTime = "document_mod_time"
+	payloadChunkIDs      = "chunk_ids"
+
+	// qdrantNamespaceField is the payload field holding a point's project
+	// namespace in a collection that several projects may share (#247).
+	qdrantNamespaceField = "project_namespace"
+	// metadataProjectNamespaces marks collections whose point IDs and payloads
+	// carry the project namespace. Schema v2 collections created before it keep
+	// their layout: their points have no namespace and are read as before.
+	metadataProjectNamespaces = "project_namespaces"
+
+	recordChunk    = "chunk"
+	recordDocument = "document"
+)
+
+var qdrantUUIDNamespace = uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+// qdrantNamespaces caches QdrantProjectNamespace per project root, so a
+// long-running process (MCP server) does not run git on every store it opens.
+var qdrantNamespaces sync.Map
 
 // QdrantProjectNamespace returns the namespace a project uses inside its
 // Qdrant collection. A collection derived from the project path belongs to that
@@ -101,49 +114,75 @@ func QdrantProjectNamespace(configuredCollection, projectRoot string) string {
 	return namespace
 }
 
-// qdrantNamespaceIndexed records the collections whose project_namespace
-// payload index this process already requested.
-var qdrantNamespaceIndexed sync.Map
+// QdrantStoreOption customizes the Qdrant collection and write path.
+type QdrantStoreOption func(*QdrantStore)
 
-// qdrantNamespaces caches QdrantProjectNamespace per project root, so a
-// long-running process (MCP server) does not run git on every store it opens.
-var qdrantNamespaces sync.Map
+// WithQdrantDenseOnDisk serves original dense vectors from disk in collections
+// this store creates.
+func WithQdrantDenseOnDisk(enabled bool) QdrantStoreOption {
+	return func(s *QdrantStore) { s.denseOnDisk = enabled }
+}
 
-// qdrantLegacyWarned remembers the collections already checked for points
-// without a namespace, so a long-running process (MCP server, watcher) counts
-// and warns once per collection instead of on every store it opens.
-var qdrantLegacyWarned sync.Map
+// WithQdrantUpsertBatchSize sets the number of points per synchronous upsert.
+func WithQdrantUpsertBatchSize(size int) QdrantStoreOption {
+	return func(s *QdrantStore) {
+		if size > 0 {
+			s.upsertBatchSize = size
+		}
+	}
+}
+
+// WithQdrantEmbeddingCacheNamespace ties the collection to one embedding
+// model, so vectors of another model are never reused or mixed in.
+func WithQdrantEmbeddingCacheNamespace(namespace string) QdrantStoreOption {
+	return func(s *QdrantStore) {
+		if strings.TrimSpace(namespace) != "" {
+			s.embeddingCacheNamespace = namespace
+		}
+	}
+}
+
+// WithQdrantProjectNamespace limits reads and writes to one project inside a
+// collection shared by several projects (see QdrantProjectNamespace). It has
+// no effect on collections created before project namespaces existed.
+func WithQdrantProjectNamespace(namespace string) QdrantStoreOption {
+	return func(s *QdrantStore) { s.namespace = namespace }
+}
+
+type QdrantStore struct {
+	client                  *qdrant.Client
+	collectionName          string
+	dimensions              int
+	apiKey                  string
+	address                 string // host:port, for error messages
+	denseOnDisk             bool
+	upsertBatchSize         int
+	embeddingCacheNamespace string
+	// namespace scopes every point to one project. Empty keeps point IDs and
+	// payloads of a collection that belongs to a single project.
+	namespace string
+}
 
 func parseHost(endpoint string) string {
 	host := strings.TrimPrefix(endpoint, "http://")
 	host = strings.TrimPrefix(host, "https://")
-
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
-
 	if idx := strings.Index(host, "/"); idx != -1 {
 		host = host[:idx]
 	}
-
 	return host
 }
 
-func NewQdrantStore(ctx context.Context, endpoint string, port int, useTLS bool, collection, apiKey string, dimensions int) (*QdrantStore, error) {
-	return NewQdrantStoreWithNamespace(ctx, endpoint, port, useTLS, collection, apiKey, dimensions, "", false)
-}
-
-// NewQdrantStoreWithNamespace opens a Qdrant store whose reads and writes are
-// limited to the given project namespace (see QdrantProjectNamespace). An empty
-// namespace behaves exactly like NewQdrantStore. With legacyReadFallback, for
-// stores that only search or report status, a namespace that holds no points
-// yet reads the points written before namespaces existed instead.
-func NewQdrantStoreWithNamespace(ctx context.Context, endpoint string, port int, useTLS bool, collection, apiKey string, dimensions int, namespace string, legacyReadFallback bool) (*QdrantStore, error) {
-	host := parseHost(endpoint)
-
+func NewQdrantStore(ctx context.Context, endpoint string, port int, useTLS bool, collection, apiKey string, dimensions int, opts ...QdrantStoreOption) (*QdrantStore, error) {
+	if dimensions <= 0 {
+		return nil, fmt.Errorf("dimensions must be positive, got: %d", dimensions)
+	}
 	if port <= 0 {
 		port = 6334
 	}
+	host := parseHost(endpoint)
 
 	client, err := qdrant.NewClient(&qdrant.Config{
 		Host:   host,
@@ -158,135 +197,25 @@ func NewQdrantStoreWithNamespace(ctx context.Context, endpoint string, port int,
 		return nil, fmt.Errorf("failed to create Qdrant client: %w", err)
 	}
 
-	store := &QdrantStore{
-		client:         client,
-		collectionName: collection,
-		dimensions:     dimensions,
-		apiKey:         apiKey,
-		address:        fmt.Sprintf("%s:%d", host, port),
-		namespace:      namespace,
+	st := &QdrantStore{
+		client:                  client,
+		collectionName:          collection,
+		dimensions:              dimensions,
+		apiKey:                  apiKey,
+		address:                 fmt.Sprintf("%s:%d", host, port),
+		denseOnDisk:             true,
+		upsertBatchSize:         defaultUpsertBatch,
+		embeddingCacheNamespace: fmt.Sprintf("embedding-cache-v2:dimensions=%d", dimensions),
+	}
+	for _, opt := range opts {
+		opt(st)
 	}
 
-	if err := store.ensureCollection(ctx); err != nil {
+	if err := st.ensureCollection(ctx); err != nil {
+		_ = client.Close()
 		return nil, err
 	}
-	if namespace != "" {
-		empty, err := store.namespaceEmpty(ctx)
-		if err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("failed to check project namespace: %w", err)
-		}
-		store.readLegacy = legacyReadFallback && empty
-		store.migrating = empty
-	}
-	store.warnLegacyPoints(ctx, legacyReadFallback)
-
-	return store, nil
-}
-
-// warnLegacyPoints tells the user about points written without a project
-// namespace in a namespaced collection. They are no longer searched; indexing
-// replaces the ones whose files belong to this project, and the rest (files
-// deleted since, or other projects sharing the collection) stay until removed.
-func (s *QdrantStore) warnLegacyPoints(ctx context.Context, readOnly bool) {
-	// Search and status only mention old points while they serve them;
-	// leftovers after the migration are reported by index and watch.
-	if s.namespace == "" || (readOnly && !s.readLegacy) {
-		return
-	}
-	key := s.address + "/" + s.collectionName + "\x00" + s.namespace
-	if _, done := qdrantLegacyWarned.LoadOrStore(key, true); done {
-		return
-	}
-	legacy := &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewIsEmpty(qdrantNamespaceField)}}
-	// Most opens find none: test for one point before saying anything.
-	points, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         legacy,
-		Limit:          qdrant.PtrOf(uint32(1)),
-	})
-	if err != nil {
-		qdrantLegacyWarned.Delete(key)
-		log.Printf("Warning: failed to check Qdrant collection %q for points without a project namespace: %v", s.collectionName, err)
-		return
-	}
-	switch {
-	case len(points) == 0:
-		return
-	case s.readLegacy:
-		log.Printf("Warning: Qdrant collection %q has no points for this project yet: searching the points written by an earlier grepai version until 'grepai index' or 'grepai watch' re-indexes the project (unchanged chunks reuse their vectors).", s.collectionName)
-		return
-	case s.migrating:
-		// Index and watch are about to replace them: nothing is left over yet.
-		log.Printf("Qdrant collection %q has no points for this project yet: indexing replaces the points an earlier grepai version wrote for its files, reusing their vectors for unchanged chunks.", s.collectionName)
-		return
-	}
-	count, err := s.client.Count(ctx, &qdrant.CountPoints{
-		CollectionName: s.collectionName,
-		Filter:         legacy,
-		Exact:          qdrant.PtrOf(true),
-	})
-	if err != nil {
-		qdrantLegacyWarned.Delete(key)
-		log.Printf("Warning: failed to count Qdrant points without a project namespace in collection %q: %v", s.collectionName, err)
-		return
-	}
-	if count > 0 {
-		log.Printf("Warning: Qdrant collection %q holds %d points from an earlier grepai version, which are no longer searched. "+
-			"'grepai index' or 'grepai watch' re-indexes this project and replaces its own (unchanged chunks reuse their vectors); "+
-			"see the Qdrant \"Sharing a Collection\" docs to remove the rest.",
-			s.collectionName, count)
-	}
-}
-
-// filter limits conditions to this store's project namespace. It returns nil
-// when there is nothing to filter on.
-func (s *QdrantStore) filter(conditions ...*qdrant.Condition) *qdrant.Filter {
-	if s.namespace != "" {
-		conditions = append(conditions, qdrant.NewMatch(qdrantNamespaceField, s.namespace))
-	}
-	if len(conditions) == 0 {
-		return nil
-	}
-	return &qdrant.Filter{Must: conditions}
-}
-
-// readFilter is the filter of search and status reads: the project's
-// namespace, or the points without a namespace while readLegacy is set.
-func (s *QdrantStore) readFilter(conditions ...*qdrant.Condition) *qdrant.Filter {
-	if s.readLegacy {
-		return &qdrant.Filter{Must: append(conditions, qdrant.NewIsEmpty(qdrantNamespaceField))}
-	}
-	return s.filter(conditions...)
-}
-
-// namespaceEmpty reports whether no point carries this store's namespace yet.
-func (s *QdrantStore) namespaceEmpty(ctx context.Context) (bool, error) {
-	points, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         s.filter(),
-		Limit:          qdrant.PtrOf(uint32(1)),
-	})
-	if err != nil {
-		return false, err
-	}
-	return len(points) == 0, nil
-}
-
-// filterWithLegacy is like filter but also matches points written without a
-// namespace, so that re-indexing a project can reuse and then replace the
-// points an earlier version wrote for it.
-func (s *QdrantStore) filterWithLegacy(conditions ...*qdrant.Condition) *qdrant.Filter {
-	if s.namespace == "" {
-		return &qdrant.Filter{Must: conditions}
-	}
-	return &qdrant.Filter{
-		Must: conditions,
-		Should: []*qdrant.Condition{
-			qdrant.NewMatch(qdrantNamespaceField, s.namespace),
-			qdrant.NewIsEmpty(qdrantNamespaceField),
-		},
-	}
+	return st, nil
 }
 
 // connectionError explains the most common cause of a failed first call:
@@ -307,541 +236,652 @@ func (s *QdrantStore) ensureCollection(ctx context.Context) error {
 	if err != nil {
 		return s.connectionError(err)
 	}
-
 	if !exists {
-		if s.dimensions <= 0 {
-			return fmt.Errorf("dimensions must be positive, got: %d", s.dimensions)
+		if err := s.createCollection(ctx); err != nil {
+			return err
 		}
-		err = s.client.CreateCollection(ctx, &qdrant.CreateCollection{
-			CollectionName: s.collectionName,
-			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+	}
+
+	info, err := s.client.GetCollectionInfo(ctx, s.collectionName)
+	if err != nil {
+		return fmt.Errorf("failed to inspect Qdrant collection: %w", err)
+	}
+	if err := s.validateCollection(info); err != nil {
+		return err
+	}
+	if !info.Config.Metadata[metadataProjectNamespaces].GetBoolValue() {
+		// Points of an older v2 collection carry no namespace: filtering on
+		// one would hide them all. Rebuild the collection to share it.
+		s.namespace = ""
+	}
+	return s.ensurePayloadIndexes(ctx, info)
+}
+
+func (s *QdrantStore) createCollection(ctx context.Context) error {
+	metadata := qdrant.NewValueMap(map[string]any{
+		"grepai_schema_version":     qdrantSchemaVersion,
+		"embedding_dimensions":      s.dimensions,
+		"embedding_cache_namespace": s.embeddingCacheNamespace,
+		metadataProjectNamespaces:   true,
+	})
+	err := s.client.CreateCollection(ctx, &qdrant.CreateCollection{
+		CollectionName: s.collectionName,
+		VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
+			denseVectorName: {
 				Size:     uint64(s.dimensions),
 				Distance: qdrant.Distance_Cosine,
-			}),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create collection: %w", err)
-		}
-	}
-
-	// Create field index for content_hash to enable efficient lookups.
-	// Error is intentionally ignored because the index may already exist.
-	_, _ = s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
-		CollectionName: s.collectionName,
-		FieldName:      "content_hash",
-		FieldType:      qdrant.PtrOf(qdrant.FieldType_FieldTypeKeyword),
+				OnDisk:   qdrant.PtrOf(s.denseOnDisk),
+			},
+		}),
+		SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
+			bm25VectorName:     {Modifier: qdrant.Modifier_Idf.Enum()},
+			metadataVectorName: {},
+		}),
+		ShardNumber:       qdrant.PtrOf(uint32(1)),
+		ReplicationFactor: qdrant.PtrOf(uint32(1)),
+		Metadata:          metadata,
 	})
-	if s.namespace != "" {
-		key := s.address + "/" + s.collectionName
-		if _, done := qdrantNamespaceIndexed.Load(key); !done {
-			// An error (the index may already exist) is retried by the next
-			// store; success is remembered for the life of the process.
-			if _, err := s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
-				CollectionName: s.collectionName,
-				FieldName:      qdrantNamespaceField,
-				FieldType:      qdrant.PtrOf(qdrant.FieldType_FieldTypeKeyword),
-			}); err == nil {
-				qdrantNamespaceIndexed.Store(key, true)
-			}
-		}
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		return fmt.Errorf("failed to create Qdrant collection: %w", err)
 	}
-
 	return nil
 }
 
-func sanitizeCollectionName(path string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\\', ':', '/':
-			return '_'
-		}
-		return r
-	}, path)
+func (s *QdrantStore) validateCollection(info *qdrant.CollectionInfo) error {
+	if info == nil || info.Config == nil || info.Config.Params == nil {
+		return s.schemaError("collection configuration is missing")
+	}
+	metadata := info.Config.Metadata
+	if metadata["grepai_schema_version"].GetIntegerValue() != qdrantSchemaVersion {
+		return s.schemaError("unsupported or missing grepai schema version")
+	}
+	if int(metadata["embedding_dimensions"].GetIntegerValue()) != s.dimensions {
+		return s.schemaError(fmt.Sprintf("embedding dimension mismatch: collection=%d config=%d", metadata["embedding_dimensions"].GetIntegerValue(), s.dimensions))
+	}
+	if metadata["embedding_cache_namespace"].GetStringValue() != s.embeddingCacheNamespace {
+		return s.schemaError("embedding model/cache namespace mismatch")
+	}
+
+	vectors := info.Config.Params.VectorsConfig.GetParamsMap()
+	if vectors == nil || vectors.Map[denseVectorName] == nil {
+		return s.schemaError("named dense vector is missing")
+	}
+	dense := vectors.Map[denseVectorName]
+	if dense.Size != uint64(s.dimensions) || dense.Distance != qdrant.Distance_Cosine {
+		return s.schemaError("dense vector configuration mismatch")
+	}
+	sparse := info.Config.Params.SparseVectorsConfig
+	if sparse == nil || sparse.Map[bm25VectorName] == nil || sparse.Map[bm25VectorName].GetModifier() != qdrant.Modifier_Idf {
+		return s.schemaError("BM25 sparse vector with IDF is missing")
+	}
+	if sparse.Map[metadataVectorName] == nil {
+		return s.schemaError("metadata sparse vector is missing")
+	}
+	return nil
 }
 
+func (s *QdrantStore) schemaError(reason string) error {
+	return fmt.Errorf("Qdrant collection %q is incompatible with grepai schema v%d: %s; choose a new collection name or rebuild the collection", s.collectionName, qdrantSchemaVersion, reason)
+}
+
+func (s *QdrantStore) ensurePayloadIndexes(ctx context.Context, info *qdrant.CollectionInfo) error {
+	type payloadIndex struct {
+		name   string
+		prefix bool
+	}
+	indexes := []payloadIndex{
+		{payloadRecordType, false},
+		{payloadFilePath, true},
+		{payloadContentHash, false},
+		{payloadCacheNS, false},
+	}
+	if s.namespace != "" {
+		indexes = append(indexes, payloadIndex{qdrantNamespaceField, false})
+	}
+	for _, index := range indexes {
+		if existing, ok := info.PayloadSchema[index.name]; ok {
+			if existing.GetDataType() != qdrant.PayloadSchemaType_Keyword {
+				return s.schemaError(fmt.Sprintf("payload index %q has the wrong type", index.name))
+			}
+			if index.prefix {
+				params := existing.GetParams().GetKeywordIndexParams()
+				if params == nil || params.Prefix == nil {
+					return s.schemaError(fmt.Sprintf("payload index %q does not support prefix matching", index.name))
+				}
+			}
+			continue
+		}
+
+		request := &qdrant.CreateFieldIndexCollection{
+			CollectionName: s.collectionName,
+			FieldName:      index.name,
+			Wait:           qdrant.PtrOf(true),
+			FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
+		}
+		if index.prefix {
+			request.FieldIndexParams = qdrant.NewPayloadIndexParamsKeyword(
+				&qdrant.KeywordIndexParams{Prefix: &qdrant.KeywordPrefixParams{}},
+			)
+		}
+		if _, err := s.client.CreateFieldIndex(ctx, request); err != nil {
+			return fmt.Errorf("failed to create Qdrant payload index %q: %w", index.name, err)
+		}
+	}
+	return nil
+}
+
+// filter combines conditions with this store's project namespace. It returns
+// nil when there is nothing to filter on.
+func (s *QdrantStore) filter(conditions ...*qdrant.Condition) *qdrant.Filter {
+	if s.namespace != "" {
+		conditions = append(conditions, qdrant.NewMatch(qdrantNamespaceField, s.namespace))
+	}
+	if len(conditions) == 0 {
+		return nil
+	}
+	return &qdrant.Filter{Must: conditions}
+}
+
+func (s *QdrantStore) recordTypeFilter(recordType string) *qdrant.Filter {
+	return s.filter(qdrant.NewMatch(payloadRecordType, recordType))
+}
+
+func sanitizeUTF8(value string) string {
+	if utf8.ValidString(value) {
+		return value
+	}
+	return strings.ToValidUTF8(value, "�")
+}
+
+// SanitizeCollectionName creates a collision-resistant collection name from a
+// repository path.
 func SanitizeCollectionName(path string) string {
-	return sanitizeCollectionName(path)
+	canonical := filepath.ToSlash(filepath.Clean(path))
+	slugSource := filepath.Base(filepath.Clean(path))
+	var slug strings.Builder
+	for _, r := range strings.ToLower(slugSource) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			slug.WriteRune(r)
+		} else {
+			slug.WriteByte('_')
+		}
+	}
+	name := strings.Trim(slug.String(), "_-")
+	if name == "" || name == "." {
+		name = "repo"
+	}
+	if len(name) > 48 {
+		name = name[:48]
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("grepai_%s_%s", name, hex.EncodeToString(digest[:6]))
+}
+
+func sanitizeCollectionName(path string) string {
+	return SanitizeCollectionName(path)
+}
+
+func (s *QdrantStore) pointUUID(kind, id string) uuid.UUID {
+	if s.namespace != "" {
+		// Chunk IDs and document paths are relative, identical across
+		// projects: without the namespace two projects overwrite each other.
+		return uuid.NewSHA1(qdrantUUIDNamespace, []byte(kind+":"+s.namespace+"\x00"+id))
+	}
+	return uuid.NewSHA1(qdrantUUIDNamespace, []byte(kind+":"+id))
+}
+
+func (s *QdrantStore) pointID(kind, id string) *qdrant.PointId {
+	return qdrant.NewID(s.pointUUID(kind, id).String())
 }
 
 func (s *QdrantStore) getUUIDForChunk(chunkID string) uuid.UUID {
-	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-	if s.namespace != "" {
-		// Chunk IDs are relative paths, identical across projects: without the
-		// project namespace two projects overwrite each other's points (#247).
-		return uuid.NewSHA1(namespace, []byte(s.namespace+"\x00"+chunkID))
+	return s.pointUUID(recordChunk, chunkID)
+}
+
+func bm25Document(text string) *qdrant.Document {
+	return &qdrant.Document{
+		Model: bm25ModelName,
+		Text:  sanitizeUTF8(text),
+		Options: qdrant.NewValueMap(map[string]any{
+			"stemmer":       map[string]any{"type": "none"},
+			"stopwords":     map[string]any{},
+			"tokenizer":     "word",
+			"ascii_folding": false,
+		}),
 	}
-	return uuid.NewSHA1(namespace, []byte(chunkID))
 }
 
 func (s *QdrantStore) SaveChunks(ctx context.Context, chunks []Chunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-
-	points := make([]*qdrant.PointStruct, 0, len(chunks))
-	for _, chunk := range chunks {
-		payload, err := s.buildChunkPayload(chunk)
-		if err != nil {
-			return fmt.Errorf("failed to build payload: %w", err)
+	batch := s.upsertBatchSize
+	if batch <= 0 {
+		// A zero batch size would never advance the loop.
+		batch = defaultUpsertBatch
+	}
+	for start := 0; start < len(chunks); start += batch {
+		end := start + batch
+		if end > len(chunks) {
+			end = len(chunks)
 		}
-
-		pointID := s.getUUIDForChunk(chunk.ID)
-
-		points = append(points, &qdrant.PointStruct{
-			Id:      qdrant.NewID(pointID.String()),
-			Vectors: qdrant.NewVectors(chunk.Vector...),
-			Payload: payload,
-		})
+		points := make([]*qdrant.PointStruct, 0, end-start)
+		for _, chunk := range chunks[start:end] {
+			if len(chunk.Vector) != s.dimensions {
+				return fmt.Errorf("chunk %q has %d vector dimensions, expected %d", chunk.ID, len(chunk.Vector), s.dimensions)
+			}
+			payload, err := s.buildChunkPayload(chunk)
+			if err != nil {
+				return fmt.Errorf("failed to build payload for chunk %q: %w", chunk.ID, err)
+			}
+			points = append(points, &qdrant.PointStruct{
+				Id: s.pointID(recordChunk, chunk.ID),
+				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+					denseVectorName: qdrant.NewVector(chunk.Vector...),
+					bm25VectorName:  qdrant.NewVectorDocument(bm25Document(chunk.Content)),
+				}),
+				Payload: payload,
+			})
+		}
+		if _, err := s.client.Upsert(ctx, &qdrant.UpsertPoints{
+			CollectionName: s.collectionName,
+			Wait:           qdrant.PtrOf(true),
+			Points:         points,
+		}); err != nil {
+			return fmt.Errorf("failed to upsert Qdrant chunk batch: %w", err)
+		}
 	}
-
-	_, err := s.client.Upsert(ctx, &qdrant.UpsertPoints{
-		CollectionName: s.collectionName,
-		// Wait until the points are applied, so a read that follows (RPG
-		// chunk linking, document lookup) sees them.
-		Wait:   qdrant.PtrOf(true),
-		Points: points,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to upsert points: %w", err)
-	}
-
 	return nil
 }
 
 func (s *QdrantStore) buildChunkPayload(chunk Chunk) (map[string]*qdrant.Value, error) {
-	payload := make(map[string]*qdrant.Value)
-
-	filePathVal, err := qdrant.NewValue(chunk.FilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file_path value: %w", err)
+	fields := map[string]any{
+		payloadRecordType:  recordChunk,
+		payloadChunkID:     chunk.ID,
+		payloadFilePath:    chunk.FilePath,
+		payloadStartLine:   chunk.StartLine,
+		payloadEndLine:     chunk.EndLine,
+		payloadContent:     sanitizeUTF8(chunk.Content),
+		payloadHash:        chunk.Hash,
+		payloadContentHash: chunk.ContentHash,
+		payloadCacheNS:     s.embeddingCacheNamespace,
+		payloadUpdatedAt:   chunk.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
-
-	startLineVal, err := qdrant.NewValue(int64(chunk.StartLine))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create start_line value: %w", err)
-	}
-
-	endLineVal, err := qdrant.NewValue(int64(chunk.EndLine))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create end_line value: %w", err)
-	}
-
-	contentVal, err := qdrant.NewValue(sanitizeUTF8(chunk.Content))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create content value: %w", err)
-	}
-
-	hashVal, err := qdrant.NewValue(chunk.Hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create hash value: %w", err)
-	}
-
-	updatedAtVal, err := qdrant.NewValue(chunk.UpdatedAt.Format(time.RFC3339))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create updated_at value: %w", err)
-	}
-
-	payload["file_path"] = filePathVal
-	payload["start_line"] = startLineVal
-	payload["end_line"] = endLineVal
-	payload["content"] = contentVal
-	payload["hash"] = hashVal
-	payload["updated_at"] = updatedAtVal
-
-	if s.namespace != "" {
-		namespaceVal, err := qdrant.NewValue(s.namespace)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create %s value: %w", qdrantNamespaceField, err)
-		}
-		payload[qdrantNamespaceField] = namespaceVal
-	}
-
 	if chunk.FileHash != "" {
-		fileHashVal, err := qdrant.NewValue(chunk.FileHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create file_hash value: %w", err)
-		}
-		payload["file_hash"] = fileHashVal
+		fields[payloadFileHash] = chunk.FileHash
 	}
-
-	if chunk.ContentHash != "" {
-		contentHashVal, err := qdrant.NewValue(chunk.ContentHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create content_hash value: %w", err)
-		}
-		payload["content_hash"] = contentHashVal
+	if s.namespace != "" {
+		fields[qdrantNamespaceField] = s.namespace
 	}
-
-	return payload, nil
+	return qdrant.TryValueMap(fields)
 }
 
+// DeleteByFile removes the file's chunks together with its document record in
+// one operation, so a crash before the new chunks are saved never leaves a
+// document that the next scan would trust and skip (#356).
 func (s *QdrantStore) DeleteByFile(ctx context.Context, filePath string) error {
-	// Points an earlier version wrote for this path without a namespace go too:
-	// the file is being re-indexed or removed, and they would otherwise be left
-	// unreachable in the collection.
-	filter := s.filterWithLegacy(qdrant.NewMatch("file_path", filePath))
-
 	_, err := s.client.Delete(ctx, &qdrant.DeletePoints{
 		CollectionName: s.collectionName,
 		Wait:           qdrant.PtrOf(true),
-		Points:         qdrant.NewPointsSelectorFilter(filter),
+		Points:         qdrant.NewPointsSelectorFilter(s.filter(qdrant.NewMatch(payloadFilePath, filePath))),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to delete points: %w", err)
+		return fmt.Errorf("failed to delete Qdrant chunks for %q: %w", filePath, err)
 	}
-
 	return nil
 }
 
-// qdrantPathSearchMaxScanned bounds how many ranked points a path-filtered
-// search examines before giving up on filling the limit.
-const qdrantPathSearchMaxScanned = 20000
+func (s *QdrantStore) searchFilter(opts SearchOptions) *qdrant.Filter {
+	filter := s.recordTypeFilter(recordChunk)
+	prefixes := normalizedSearchPathPrefixes(opts)
+	switch len(prefixes) {
+	case 0:
+	case 1:
+		filter.Must = append(filter.Must, qdrant.NewMatchPrefix(payloadFilePath, prefixes[0]))
+	default:
+		filter.Should = make([]*qdrant.Condition, 0, len(prefixes))
+		for _, prefix := range prefixes {
+			filter.Should = append(filter.Should, qdrant.NewMatchPrefix(payloadFilePath, prefix))
+		}
+	}
+	return filter
+}
 
 func (s *QdrantStore) Search(ctx context.Context, queryVector []float32, limit int, opts SearchOptions) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("limit must be positive, got: %d", limit)
 	}
-
-	// The path prefix is filtered here, not in Qdrant, so a path-filtered
-	// search walks the ranking page by page until it has enough matches.
-	// Fetching a single page of 2x the limit returned too few results (often
-	// none) whenever the best matches were outside the path.
-	pageSize := limit
-	if opts.PathPrefix != "" {
-		pageSize = limit * 4
-		if pageSize < 64 {
-			pageSize = 64
-		}
+	if len(queryVector) != s.dimensions {
+		return nil, fmt.Errorf("query has %d vector dimensions, expected %d", len(queryVector), s.dimensions)
 	}
-
-	results := make([]SearchResult, 0, limit)
-	for offset := 0; offset < qdrantPathSearchMaxScanned; offset += pageSize {
-		page, err := s.client.Query(ctx, &qdrant.QueryPoints{
-			CollectionName: s.collectionName,
-			Query:          qdrant.NewQuery(queryVector...),
-			Limit:          qdrant.PtrOf(uint64(pageSize)),
-			Offset:         qdrant.PtrOf(uint64(offset)),
-			Filter:         s.readFilter(),
-			WithPayload:    qdrant.NewWithPayloadInclude("file_path", "start_line", "end_line", "content", "hash", "updated_at"),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to search: %w", err)
-		}
-
-		for _, point := range page {
-			chunk := s.parseChunkPayload(point.Payload)
-			if opts.PathPrefix != "" && !strings.HasPrefix(chunk.FilePath, opts.PathPrefix) {
-				continue
-			}
-			// Hybrid search fuses results by chunk ID: use the point ID, as
-			// GetAllChunks does, so results stay distinct and match.
-			chunk.ID = point.GetId().GetUuid()
-			results = append(results, SearchResult{Chunk: *chunk, Score: point.Score})
-			if len(results) >= limit {
-				return results, nil
-			}
-		}
-
-		if opts.PathPrefix == "" || len(page) < pageSize {
-			break
-		}
+	points, err := s.client.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: s.collectionName,
+		Query:          qdrant.NewQuery(queryVector...),
+		Using:          qdrant.PtrOf(denseVectorName),
+		Filter:         s.searchFilter(opts),
+		Limit:          qdrant.PtrOf(uint64(limit)),
+		WithPayload:    qdrant.NewWithPayloadInclude(payloadChunkID, payloadFilePath, payloadStartLine, payloadEndLine, payloadContent, payloadHash, payloadContentHash, payloadUpdatedAt),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search Qdrant: %w", err)
 	}
-
-	return results, nil
+	return parseScoredPoints(points), nil
 }
 
-func (s *QdrantStore) parseChunkPayload(payload map[string]*qdrant.Value) *Chunk {
-	chunk := &Chunk{}
-	if val, ok := payload["file_path"]; ok {
-		chunk.FilePath = val.GetStringValue()
+func (s *QdrantStore) SearchHybrid(ctx context.Context, query string, queryVector []float32, limit int, opts SearchOptions, rrfK float32) ([]SearchResult, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive, got: %d", limit)
 	}
-	if val, ok := payload["start_line"]; ok {
-		chunk.StartLine = int(val.GetIntegerValue())
+	if len(queryVector) != s.dimensions {
+		return nil, fmt.Errorf("query has %d vector dimensions, expected %d", len(queryVector), s.dimensions)
 	}
-	if val, ok := payload["end_line"]; ok {
-		chunk.EndLine = int(val.GetIntegerValue())
+	if strings.TrimSpace(query) == "" {
+		return s.Search(ctx, queryVector, limit, opts)
 	}
-	if val, ok := payload["content"]; ok {
-		chunk.Content = val.GetStringValue()
+	k := uint32(math.Round(float64(rrfK)))
+	if k == 0 {
+		k = 60
 	}
-	if val, ok := payload["hash"]; ok {
-		chunk.Hash = val.GetStringValue()
+	filter := s.searchFilter(opts)
+	points, err := s.client.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: s.collectionName,
+		Prefetch: []*qdrant.PrefetchQuery{
+			{Query: qdrant.NewQuery(queryVector...), Using: qdrant.PtrOf(denseVectorName), Filter: filter, Limit: qdrant.PtrOf(uint64(limit))},
+			{Query: qdrant.NewQueryNearest(qdrant.NewVectorInputDocument(bm25Document(query))), Using: qdrant.PtrOf(bm25VectorName), Filter: filter, Limit: qdrant.PtrOf(uint64(limit))},
+		},
+		Query:       qdrant.NewQueryRRF(&qdrant.Rrf{K: qdrant.PtrOf(k)}),
+		Filter:      filter,
+		Limit:       qdrant.PtrOf(uint64(limit)),
+		WithPayload: qdrant.NewWithPayloadInclude(payloadChunkID, payloadFilePath, payloadStartLine, payloadEndLine, payloadContent, payloadHash, payloadContentHash, payloadUpdatedAt),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to run Qdrant hybrid search: %w", err)
 	}
-	if val, ok := payload["updated_at"]; ok {
-		t, err := time.Parse(time.RFC3339, val.GetStringValue())
-		if err == nil {
-			chunk.UpdatedAt = t
-		}
-	}
-	if val, ok := payload["file_hash"]; ok {
-		chunk.FileHash = val.GetStringValue()
-	}
-	if val, ok := payload["content_hash"]; ok {
-		chunk.ContentHash = val.GetStringValue()
-	}
+	return parseScoredPoints(points), nil
+}
 
+func parseScoredPoints(points []*qdrant.ScoredPoint) []SearchResult {
+	results := make([]SearchResult, 0, len(points))
+	for _, point := range points {
+		results = append(results, SearchResult{Chunk: *parseChunkPayload(point.Payload), Score: point.Score})
+	}
+	return results
+}
+
+func parseChunkPayload(payload map[string]*qdrant.Value) *Chunk {
+	chunk := &Chunk{}
+	chunk.ID = payload[payloadChunkID].GetStringValue()
+	chunk.FilePath = payload[payloadFilePath].GetStringValue()
+	chunk.StartLine = int(payload[payloadStartLine].GetIntegerValue())
+	chunk.EndLine = int(payload[payloadEndLine].GetIntegerValue())
+	chunk.Content = payload[payloadContent].GetStringValue()
+	chunk.Hash = payload[payloadHash].GetStringValue()
+	chunk.FileHash = payload[payloadFileHash].GetStringValue()
+	chunk.ContentHash = payload[payloadContentHash].GetStringValue()
+	if raw := payload[payloadUpdatedAt].GetStringValue(); raw != "" {
+		chunk.UpdatedAt, _ = time.Parse(time.RFC3339Nano, raw)
+	}
 	return chunk
 }
 
-// qdrantScrollPageSize is the number of points read per scroll request.
-const qdrantScrollPageSize = 1000
-
-// qdrantLookupLimit bounds the points (and vectors) read by one
-// LookupByContentHash call.
-const qdrantLookupLimit = 64
-
-// scrollEach reads every point matching req, page by page. A single Scroll
-// call returns at most one page, so reading only the first page silently
-// truncated results on collections with more points than the page size.
-func (s *QdrantStore) scrollEach(ctx context.Context, req *qdrant.ScrollPoints, visit func(*qdrant.RetrievedPoint)) error {
-	req.Limit = qdrant.PtrOf(uint32(qdrantScrollPageSize))
-	for {
-		points, next, err := s.client.ScrollAndOffset(ctx, req)
-		if err != nil {
-			return err
-		}
-		for _, point := range points {
-			visit(point)
-		}
-		if next == nil || len(points) == 0 {
-			return nil
-		}
-		req.Offset = next
-	}
+func (s *QdrantStore) parseChunkPayload(payload map[string]*qdrant.Value) *Chunk {
+	return parseChunkPayload(payload)
 }
 
-func pointVector(point *qdrant.RetrievedPoint) []float32 {
-	if point.Vectors != nil && point.Vectors.GetVector() != nil {
-		if dense := point.Vectors.GetVector().GetDense(); dense != nil {
-			return dense.GetData()
-		}
+func stringsToAny(values []string) []any {
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = value
 	}
-	return nil
+	return result
+}
+
+func payloadStrings(value *qdrant.Value) []string {
+	if value == nil || value.GetListValue() == nil {
+		return nil
+	}
+	values := value.GetListValue().GetValues()
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		result = append(result, item.GetStringValue())
+	}
+	return result
 }
 
 func (s *QdrantStore) GetDocument(ctx context.Context, filePath string) (*Document, error) {
-	doc := &Document{Path: filePath}
-	err := s.scrollEach(ctx, &qdrant.ScrollPoints{
+	points, err := s.client.Get(ctx, &qdrant.GetPoints{
 		CollectionName: s.collectionName,
-		Filter:         s.filter(qdrant.NewMatch("file_path", filePath)),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path", "file_hash"),
-	}, func(point *qdrant.RetrievedPoint) {
-		doc.ChunkIDs = append(doc.ChunkIDs, point.GetId().String())
-		if doc.Hash == "" {
-			// Older points have no file_hash; keep Hash empty so the hash
-			// comparison requests re-indexing rather than using a chunk hash.
-			doc.Hash = point.GetPayload()["file_hash"].GetStringValue()
-		}
+		Ids:            []*qdrant.PointId{s.pointID(recordDocument, filePath)},
+		WithPayload:    qdrant.NewWithPayload(true),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get document: %w", err)
+		return nil, fmt.Errorf("failed to get Qdrant document %q: %w", filePath, err)
 	}
-	if len(doc.ChunkIDs) == 0 {
+	if len(points) == 0 {
 		return nil, nil
+	}
+	payload := points[0].Payload
+	doc := &Document{
+		Path:     payload[payloadFilePath].GetStringValue(),
+		Hash:     payload[payloadDocumentHash].GetStringValue(),
+		ChunkIDs: payloadStrings(payload[payloadChunkIDs]),
+	}
+	if raw := payload[payloadDocumentMTime].GetStringValue(); raw != "" {
+		doc.ModTime, _ = time.Parse(time.RFC3339Nano, raw)
 	}
 	return doc, nil
 }
 
-// DisableLegacyVectorReuse stops LookupByContentHash from reusing vectors of
-// points written before namespaces existed. The indexer calls it when the
-// embedding model changed: those points were not removed with the project's
-// namespaced documents and hold vectors of the previous model.
-func (s *QdrantStore) DisableLegacyVectorReuse() {
-	s.noLegacyVectors = true
-}
-
-// SaveDocument is a no-op: document metadata is stored in chunk payloads by SaveChunks.
 func (s *QdrantStore) SaveDocument(ctx context.Context, doc Document) error {
+	fields := map[string]any{
+		payloadRecordType:    recordDocument,
+		payloadFilePath:      doc.Path,
+		payloadDocumentHash:  doc.Hash,
+		payloadDocumentMTime: doc.ModTime.UTC().Format(time.RFC3339Nano),
+		payloadChunkIDs:      stringsToAny(doc.ChunkIDs),
+		payloadUpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if s.namespace != "" {
+		fields[qdrantNamespaceField] = s.namespace
+	}
+	payload, err := qdrant.TryValueMap(fields)
+	if err != nil {
+		return fmt.Errorf("failed to build Qdrant document payload: %w", err)
+	}
+	_, err = s.client.Upsert(ctx, &qdrant.UpsertPoints{
+		CollectionName: s.collectionName,
+		Wait:           qdrant.PtrOf(true),
+		Points: []*qdrant.PointStruct{{
+			Id: s.pointID(recordDocument, doc.Path),
+			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+				metadataVectorName: qdrant.NewVectorSparse([]uint32{0}, []float32{1}),
+			}),
+			Payload: payload,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save Qdrant document %q: %w", doc.Path, err)
+	}
 	return nil
 }
 
-// DeleteDocument is a no-op: DeleteByFile removes the chunks and their document metadata.
 func (s *QdrantStore) DeleteDocument(ctx context.Context, filePath string) error {
+	_, err := s.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: s.collectionName,
+		Wait:           qdrant.PtrOf(true),
+		Points:         qdrant.NewPointsSelector(s.pointID(recordDocument, filePath)),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete Qdrant document %q: %w", filePath, err)
+	}
 	return nil
+}
+
+func (s *QdrantStore) scrollAll(ctx context.Context, filter *qdrant.Filter, payloadFields []string, withVectors *qdrant.WithVectorsSelector, visit func(*qdrant.RetrievedPoint) error) error {
+	request := &qdrant.ScrollPoints{
+		CollectionName: s.collectionName,
+		Filter:         filter,
+		Limit:          qdrant.PtrOf(uint32(defaultScrollPage)),
+		WithVectors:    withVectors,
+	}
+	if payloadFields == nil {
+		request.WithPayload = qdrant.NewWithPayload(true)
+	} else {
+		request.WithPayload = qdrant.NewWithPayloadInclude(payloadFields...)
+	}
+	iterator := s.client.ScrollAll(ctx, request)
+	for {
+		points, err := iterator.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, point := range points {
+			if err := visit(point); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (s *QdrantStore) ListDocuments(ctx context.Context) ([]string, error) {
-	pathsMap := make(map[string]bool)
-	err := s.scrollEach(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         s.filter(),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path"),
-	}, func(point *qdrant.RetrievedPoint) {
-		if val, ok := point.Payload["file_path"]; ok {
-			pathsMap[val.GetStringValue()] = true
-		}
+	paths := make([]string, 0)
+	err := s.scrollAll(ctx, s.recordTypeFilter(recordDocument), []string{payloadFilePath}, nil, func(point *qdrant.RetrievedPoint) error {
+		paths = append(paths, point.Payload[payloadFilePath].GetStringValue())
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list documents: %w", err)
+		return nil, fmt.Errorf("failed to list Qdrant documents: %w", err)
 	}
-
-	paths := make([]string, 0, len(pathsMap))
-	for path := range pathsMap {
-		paths = append(paths, path)
-	}
+	sort.Strings(paths)
 	return paths, nil
 }
 
-func (s *QdrantStore) Load(ctx context.Context) error {
-	return nil
-}
-
-func (s *QdrantStore) Persist(ctx context.Context) error {
-	return nil
-}
-
-func (s *QdrantStore) Close() error {
-	return nil
-}
+func (s *QdrantStore) Load(context.Context) error    { return nil }
+func (s *QdrantStore) Persist(context.Context) error { return nil }
+func (s *QdrantStore) Close() error                  { return s.client.Close() }
 
 func (s *QdrantStore) GetStats(ctx context.Context) (*IndexStats, error) {
-	files, err := s.ListFilesWithStats(ctx)
+	exact := true
+	files, err := s.client.Count(ctx, &qdrant.CountPoints{CollectionName: s.collectionName, Filter: s.recordTypeFilter(recordDocument), Exact: &exact})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to count Qdrant documents: %w", err)
 	}
-
-	var totalChunks int
-	if s.namespace != "" {
-		// The collection may hold other projects' points: count only ours,
-		// which the namespaced file listing has already scrolled.
-		for _, f := range files {
-			totalChunks += f.ChunkCount
-		}
-	} else {
-		collectionInfo, err := s.client.GetCollectionInfo(ctx, s.collectionName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get collection info: %w", err)
-		}
-		pointsCount := *collectionInfo.PointsCount
-		if pointsCount > uint64(^uint(0)>>1) {
-			return nil, fmt.Errorf("points count %d exceeds maximum int value", pointsCount)
-		}
-		totalChunks = int(pointsCount)
+	chunks, err := s.client.Count(ctx, &qdrant.CountPoints{CollectionName: s.collectionName, Filter: s.recordTypeFilter(recordChunk), Exact: &exact})
+	if err != nil {
+		return nil, fmt.Errorf("failed to count Qdrant chunks: %w", err)
 	}
-
-	var lastUpdated time.Time
-	for _, f := range files {
-		if f.ModTime.After(lastUpdated) {
-			lastUpdated = f.ModTime
-		}
+	if files > uint64(^uint(0)>>1) || chunks > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("Qdrant counts exceed maximum int value")
 	}
-
-	return &IndexStats{
-		TotalFiles:  len(files),
-		TotalChunks: totalChunks,
-		IndexSize:   0, // not exposed by Qdrant
-		LastUpdated: lastUpdated,
-	}, nil
+	stats := &IndexStats{TotalFiles: int(files), TotalChunks: int(chunks)}
+	err = s.scrollAll(ctx, s.recordTypeFilter(recordDocument), []string{payloadUpdatedAt}, nil, func(point *qdrant.RetrievedPoint) error {
+		updated, parseErr := time.Parse(time.RFC3339Nano, point.Payload[payloadUpdatedAt].GetStringValue())
+		if parseErr == nil && updated.After(stats.LastUpdated) {
+			stats.LastUpdated = updated
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate Qdrant index timestamp: %w", err)
+	}
+	return stats, nil
 }
 
 func (s *QdrantStore) ListFilesWithStats(ctx context.Context) ([]FileStats, error) {
-	fileStats := make(map[string]*FileStats)
-	err := s.scrollEach(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         s.readFilter(),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path", "updated_at"),
-	}, func(point *qdrant.RetrievedPoint) {
-		filePath := point.Payload["file_path"].GetStringValue()
-		if filePath == "" {
-			return
-		}
-		stat, exists := fileStats[filePath]
-		if !exists {
-			stat = &FileStats{Path: filePath}
-			fileStats[filePath] = stat
-		}
-		stat.ChunkCount++
-		// Last update of the file = most recent chunk write.
-		if t, err := time.Parse(time.RFC3339, point.Payload["updated_at"].GetStringValue()); err == nil && t.After(stat.ModTime) {
-			stat.ModTime = t
-		}
+	files := make([]FileStats, 0)
+	err := s.scrollAll(ctx, s.recordTypeFilter(recordDocument), []string{payloadFilePath, payloadDocumentMTime, payloadChunkIDs}, nil, func(point *qdrant.RetrievedPoint) error {
+		payload := point.Payload
+		stat := FileStats{Path: payload[payloadFilePath].GetStringValue(), ChunkCount: len(payloadStrings(payload[payloadChunkIDs]))}
+		stat.ModTime, _ = time.Parse(time.RFC3339Nano, payload[payloadDocumentMTime].GetStringValue())
+		files = append(files, stat)
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files: %w", err)
+		return nil, fmt.Errorf("failed to list Qdrant file stats: %w", err)
 	}
-
-	result := make([]FileStats, 0, len(fileStats))
-	for _, stat := range fileStats {
-		result = append(result, *stat)
-	}
-	return result, nil
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
 }
 
 func (s *QdrantStore) GetChunksForFile(ctx context.Context, filePath string) ([]Chunk, error) {
-	var chunks []Chunk
-	err := s.scrollEach(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         s.readFilter(qdrant.NewMatch("file_path", filePath)),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path", "start_line", "end_line", "content", "hash", "updated_at"),
-		WithVectors:    qdrant.NewWithVectors(true),
-	}, func(point *qdrant.RetrievedPoint) {
-		chunk := s.parseChunkPayload(point.Payload)
-		chunk.Vector = pointVector(point)
-		// The payload has no chunk ID: use the point ID, so each chunk keeps a
-		// distinct ID (RPG chunk nodes are keyed by it).
-		chunk.ID = point.GetId().GetUuid()
-		chunks = append(chunks, *chunk)
+	filter := s.filter(
+		qdrant.NewMatch(payloadRecordType, recordChunk),
+		qdrant.NewMatch(payloadFilePath, filePath),
+	)
+	chunks := make([]Chunk, 0)
+	err := s.scrollAll(ctx, filter, nil, qdrant.NewWithVectorsInclude(denseVectorName), func(point *qdrant.RetrievedPoint) error {
+		chunk := *parseChunkPayload(point.Payload)
+		chunk.Vector = denseVectorFromPoint(point)
+		chunks = append(chunks, chunk)
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get chunks: %w", err)
+		return nil, fmt.Errorf("failed to get Qdrant chunks for %q: %w", filePath, err)
 	}
+	sort.Slice(chunks, func(i, j int) bool { return chunks[i].StartLine < chunks[j].StartLine })
 	return chunks, nil
 }
 
 func (s *QdrantStore) GetAllChunks(ctx context.Context) ([]Chunk, error) {
-	var chunks []Chunk
-	err := s.scrollEach(ctx, &qdrant.ScrollPoints{
-		CollectionName: s.collectionName,
-		Filter:         s.readFilter(),
-		WithPayload:    qdrant.NewWithPayloadInclude("file_path", "start_line", "end_line", "content", "hash", "updated_at"),
-	}, func(point *qdrant.RetrievedPoint) {
-		chunk := s.parseChunkPayload(point.Payload)
-		chunk.Vector = pointVector(point)
-		chunk.ID = point.GetId().GetUuid()
-		chunks = append(chunks, *chunk)
+	chunks := make([]Chunk, 0)
+	err := s.scrollAll(ctx, s.recordTypeFilter(recordChunk), nil, nil, func(point *qdrant.RetrievedPoint) error {
+		chunks = append(chunks, *parseChunkPayload(point.Payload))
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get all chunks: %w", err)
+		return nil, fmt.Errorf("failed to get all Qdrant chunks: %w", err)
 	}
 	return chunks, nil
 }
 
-// LookupByContentHash searches Qdrant for a point matching the content hash.
+func denseVectorFromPoint(point *qdrant.RetrievedPoint) []float32 {
+	if point == nil || point.Vectors == nil || point.Vectors.GetVectors() == nil {
+		return nil
+	}
+	vector := point.Vectors.GetVectors().GetVectors()[denseVectorName]
+	if vector == nil || vector.GetDense() == nil {
+		return nil
+	}
+	return vector.GetDense().GetData()
+}
+
+// LookupByContentHash returns the vector of a stored chunk with the same
+// content hash whose content starts with contentPrefix (the "File: <path>"
+// header the vector was embedded with, #366).
 func (s *QdrantStore) LookupByContentHash(ctx context.Context, contentHash, contentPrefix string) ([]float32, bool, error) {
 	if contentHash == "" {
 		return nil, false, nil
 	}
-
-	// Vectors of points an earlier version wrote without a namespace are
-	// reused too, so moving an explicit collection to namespaced points does
-	// not embed unchanged chunks again.
-	filter := s.filterWithLegacy(qdrant.NewMatch("content_hash", contentHash))
-	if s.noLegacyVectors {
-		filter = s.filter(qdrant.NewMatch("content_hash", contentHash))
-	}
-
+	filter := s.filter(
+		qdrant.NewMatch(payloadRecordType, recordChunk),
+		qdrant.NewMatch(payloadContentHash, contentHash),
+		qdrant.NewMatch(payloadCacheNS, s.embeddingCacheNamespace),
+	)
 	// Qdrant cannot match a payload prefix without a full-text index: check
 	// the content of the points sharing this content hash (usually one or a
-	// few). Only the first qdrantLookupLimit are checked: past that, a miss
-	// just re-embeds the chunk, which is cheaper than scanning every copy.
+	// few). Past qdrantLookupLimit a miss just re-embeds the chunk, which is
+	// cheaper than scanning every copy.
 	points, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
 		CollectionName: s.collectionName,
 		Filter:         filter,
 		Limit:          qdrant.PtrOf(uint32(qdrantLookupLimit)),
-		WithPayload:    qdrant.NewWithPayloadInclude("content"),
-		WithVectors:    qdrant.NewWithVectors(true),
+		WithPayload:    qdrant.NewWithPayloadInclude(payloadContent),
+		WithVectors:    qdrant.NewWithVectorsInclude(denseVectorName),
 	})
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to lookup by content hash: %w", err)
+		return nil, false, fmt.Errorf("failed to look up Qdrant content hash: %w", err)
 	}
 	// Stored content is sanitized (see buildChunkPayload): compare likewise.
 	contentPrefix = sanitizeUTF8(contentPrefix)
 	for _, point := range points {
-		if !strings.HasPrefix(point.GetPayload()["content"].GetStringValue(), contentPrefix) {
+		if !strings.HasPrefix(point.Payload[payloadContent].GetStringValue(), contentPrefix) {
 			continue
 		}
-		if vec := pointVector(point); vec != nil {
-			return vec, true, nil
+		if vector := denseVectorFromPoint(point); len(vector) > 0 {
+			return vector, true, nil
 		}
 	}
 	return nil, false, nil
