@@ -92,12 +92,36 @@ ollama pull nomic-embed-text
 
 ## Quick Start
 
+Set up the default local embedding model once. Keep `ollama serve` running in a
+separate terminal if Ollama is not already running as a service:
+
 ```bash
-grepai init                        # Initialize in your project
-grepai watch                       # Start indexing daemon
-grepai search "error handling"     # Search semantically
-grepai trace callers "Login"       # Find who calls a function
+ollama serve
+ollama pull nomic-embed-text
 ```
+
+Then initialize and index each project from its root:
+
+```bash
+cd /path/to/your/project
+grepai init --provider ollama --backend gob --yes
+grepai watch --background
+grepai status --no-ui
+grepai search "error handling"
+grepai trace callers "Login"
+```
+
+The watcher keeps the index current as files change. Manage the background
+watcher from the same project:
+
+```bash
+grepai watch --status
+grepai watch --stop
+```
+
+For another project, repeat only the `cd`, `grepai init`, and `grepai watch`
+steps. The grepai installation, Ollama installation, and embedding model are
+shared and do not need to be installed again.
 
 ## Shell Completion
 
